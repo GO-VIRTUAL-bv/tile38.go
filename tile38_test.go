@@ -1543,3 +1543,44 @@ func TestStatsDecoding(t *testing.T) {
 		t.Errorf("stats = %+v, want %+v", stats, want)
 	}
 }
+
+// SET takes the third ordinate as a trailing argument of POINT, on the pipelined
+// form as well as the direct one.
+func TestSetPointZ(t *testing.T) {
+	got := make(chan []string, 2)
+	addr, _ := fakeServerN(t, func(r *bufio.Reader, w net.Conn) {
+		for {
+			v, err := resp.ReadReply(r)
+			if err != nil {
+				return
+			}
+			arr, _ := v.([]any)
+			args := make([]string, len(arr))
+			for i, a := range arr {
+				args[i], _ = a.(string)
+			}
+			got <- args
+			_, _ = io.WriteString(w, "+OK\r\n")
+		}
+	})
+	c := New(addr)
+	defer c.Close()
+
+	if err := c.Set("fleet", "drone").PointZ(51.2, 4.4, 120.5).Do(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"SET", "fleet", "drone", "POINT", "51.2", "4.4", "120.5"}
+	if cmd := <-got; !reflect.DeepEqual(cmd, want) {
+		t.Errorf("command = %q, want %q", cmd, want)
+	}
+
+	p := c.Pipeline()
+	p.Set("fleet", "drone2").PointZ(51.2, 4.4, 0).Queue()
+	if err := p.Flush(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	want = []string{"SET", "fleet", "drone2", "POINT", "51.2", "4.4", "0"}
+	if cmd := <-got; !reflect.DeepEqual(cmd, want) {
+		t.Errorf("pipelined command = %q, want %q", cmd, want)
+	}
+}

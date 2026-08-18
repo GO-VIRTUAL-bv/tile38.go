@@ -97,6 +97,10 @@ for _, p := range pts {
 }
 ```
 
+A point may carry a third ordinate, written with `PointZ` and read back as
+`NearbyResult.Z` or through `Get(...).PointZ(ctx)`. Tile38 omits it from a reply
+when it is zero, so a zero `Z` and a two-dimensional point are the same thing.
+
 Values are Tile38's own text encoding — the decimal form of a number, the
 verbatim JSON text of a JSON field — and are absent for an object whose fields
 are all zero or when the query used `NoFields`. One object's fields come back
