@@ -601,6 +601,78 @@ func TestA5AndTileAreas(t *testing.T) {
 	}
 }
 
+// SEARCH matches string values rather than geometry, so it needs objects stored
+// with SET … STRING — which the typed builder writes through String.
+func TestSearchStringsAndFExists(t *testing.T) {
+	c, key := newClient(t)
+	ctx := t.Context()
+
+	if err := c.Set(key, "note1").Field("prio", 3).String("hello world").Do(ctx); err != nil {
+		t.Fatalf("set string: %v", err)
+	}
+	if err := c.Set(key, "note2").String("goodbye").Do(ctx); err != nil {
+		t.Fatalf("set string: %v", err)
+	}
+
+	res, err := c.Search(key).Match("*hello*").Strings(ctx)
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(res) != 1 || res[0].ID != "note1" || res[0].Value != "hello world" {
+		t.Fatalf("search = %+v, want note1/hello world", res)
+	}
+	if res[0].Fields["prio"] != "3" {
+		t.Errorf("search fields = %v, want prio=3", res[0].Fields)
+	}
+	if n, err := c.Search(key).Count(ctx); err != nil || n != 2 {
+		t.Errorf("search count = %d, %v; want 2", n, err)
+	}
+	// SEARCH is the other verb that takes an order.
+	desc, err := c.Search(key).Desc().IDs(ctx)
+	if err != nil || len(desc) != 2 || desc[0] != "note1" {
+		t.Errorf("search desc = %v, %v; want note1 first", desc, err)
+	}
+
+	// FEXISTS separates "no such field" from "field holding the zero value",
+	// which FGet cannot.
+	if ok, err := c.FExists(key, "note1", "prio").Do(ctx); err != nil || !ok {
+		t.Errorf("fexists prio = %v, %v; want true", ok, err)
+	}
+	if ok, err := c.FExists(key, "note1", "nope").Do(ctx); err != nil || ok {
+		t.Errorf("fexists nope = %v, %v; want false", ok, err)
+	}
+}
+
+// TEST compares two areas without touching stored objects.
+func TestTestCommand(t *testing.T) {
+	c, key := newClient(t)
+	ctx := t.Context()
+
+	if err := c.Set(key, "a").Point(33.5, -115.5).Do(ctx); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+
+	if ok, err := c.Test(AreaGet(key, "a")).Within(AreaBounds(GlobalBounds())).Do(ctx); err != nil || !ok {
+		t.Errorf("test within global = %v, %v; want true", ok, err)
+	}
+	if ok, err := c.Test(AreaPoint(0, 0)).Intersects(AreaCircle(33.5, -115.5, 100)).Do(ctx); err != nil || ok {
+		t.Errorf("test far point = %v, %v; want false", ok, err)
+	}
+	if ok, err := c.Test(AreaPoint(33.5, -115.5)).Intersects(AreaHash("9mv")).Do(ctx); err != nil || !ok {
+		t.Errorf("test hash = %v, %v; want true", ok, err)
+	}
+
+	// CLIP returns the clipped geometry alongside the result.
+	ok, geojson, err := c.Test(AreaBounds(33, -116, 34, -115)).
+		Intersects(AreaBounds(33.4, -115.6, 33.6, -115.4)).Clip(ctx)
+	if err != nil {
+		t.Fatalf("test clip: %v", err)
+	}
+	if !ok || geojson == "" {
+		t.Errorf("test clip = %v, %q; want true and a geometry", ok, geojson)
+	}
+}
+
 func TestKeysAndDBSize(t *testing.T) {
 	c, key := newClient(t)
 	ctx := t.Context()

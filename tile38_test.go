@@ -1386,3 +1386,86 @@ func TestDistanceOnlyOnFence(t *testing.T) {
 		})
 	}
 }
+
+// TEST is positional throughout — two areas around a verb — so nothing about it
+// can be appended in call order.
+func TestTestCommandAssembly(t *testing.T) {
+	tests := map[string]struct {
+		run   func(*Client) error
+		want  []string
+		reply string
+	}{
+		"within": {
+			run: func(c *Client) error {
+				_, err := c.Test(AreaGet("fleet", "truck1")).
+					Within(AreaBounds(GlobalBounds())).Do(t.Context())
+				return err
+			},
+			want: []string{"TEST", "GET", "fleet", "truck1", "WITHIN",
+				"BOUNDS", "-90", "-180", "90", "180"},
+			reply: ":1\r\n",
+		},
+		"intersects a sector": {
+			run: func(c *Client) error {
+				_, err := c.Test(AreaPoint(33.5, -115.5)).
+					Intersects(AreaSector(33.5, -115.5, 5000, 0, 90)).Do(t.Context())
+				return err
+			},
+			want: []string{"TEST", "POINT", "33.5", "-115.5", "INTERSECTS",
+				"SECTOR", "33.5", "-115.5", "5000", "0", "90"},
+			reply: ":0\r\n",
+		},
+		// CLIP sits between the verb and the second area, and turns the bare
+		// integer reply into [result, geojson].
+		"clip": {
+			run: func(c *Client) error {
+				_, _, err := c.Test(AreaBounds(33, -116, 34, -115)).
+					Intersects(AreaQuadKey("023")).Clip(t.Context())
+				return err
+			},
+			want: []string{"TEST", "BOUNDS", "33", "-116", "34", "-115",
+				"INTERSECTS", "CLIP", "QUADKEY", "023"},
+			reply: wire("*2", ":1", "$7", "{\"a\":1}"),
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			got := make(chan []string, 1)
+			addr := fakeServer(t, func(r *bufio.Reader, w net.Conn) {
+				got <- readCommand(t, r)
+				_, _ = io.WriteString(w, tc.reply)
+			})
+			c := New(addr)
+			defer c.Close()
+
+			if err := tc.run(c); err != nil {
+				t.Fatal(err)
+			}
+			if cmd := <-got; !reflect.DeepEqual(cmd, tc.want) {
+				t.Errorf("command = %q,\n           want %q", cmd, tc.want)
+			}
+		})
+	}
+}
+
+// SEARCH's default output pairs each id with the string value that matched,
+// where a geometry search would carry GeoJSON.
+func TestSearchStrings(t *testing.T) {
+	addr := fakeServer(t, func(r *bufio.Reader, w net.Conn) {
+		_ = readCommand(t, r)
+		_, _ = io.WriteString(w, wire("*2", ":0", "*1",
+			"*3", "$5", "note1", "$11", "hello world", "*2", "$4", "prio", "$1", "3"))
+	})
+	c := New(addr)
+	defer c.Close()
+
+	res, err := c.Search("notes").Match("*hello*").Asc().Strings(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []StringObject{{ID: "note1", Value: "hello world", Fields: Fields{"prio": "3"}}}
+	if !reflect.DeepEqual(res, want) {
+		t.Errorf("strings = %+v, want %+v", res, want)
+	}
+}

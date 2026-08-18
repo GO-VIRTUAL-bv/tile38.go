@@ -66,6 +66,14 @@ type SearchObject struct {
 	Fields  Fields
 }
 
+// StringObject holds a single result from a Search query, which matches on the
+// string values "SET … STRING" stores rather than on geometry.
+type StringObject struct {
+	ID     string
+	Value  string
+	Fields Fields
+}
+
 // RectResult holds a single result from a search using the BOUNDS output format.
 type RectResult struct {
 	ID     string
