@@ -1243,3 +1243,146 @@ func TestOutputFormatDecoding(t *testing.T) {
 		}
 	})
 }
+
+// The option and area tokens added alongside the output formats. Each is checked
+// for the slot it lands in, since a token in the wrong section malforms the
+// command rather than erroring in an obvious way.
+func TestOptionAndAreaTokens(t *testing.T) {
+	tests := map[string]struct {
+		run  func(*Client) error
+		want []string
+	}{
+		// ASC and DESC overwrite: Tile38 rejects a command carrying both.
+		"scan order overwrites": {
+			run: func(c *Client) error {
+				_, err := c.Scan("fleet").Desc().Asc().Desc().IDs(t.Context())
+				return err
+			},
+			want: []string{"SCAN", "fleet", "DESC", "IDS"},
+		},
+		"whereeval is length prefixed": {
+			run: func(c *Client) error {
+				_, err := c.Scan("fleet").WhereEval("return FIELDS.speed > tonumber(ARGV[1])", 15).IDs(t.Context())
+				return err
+			},
+			want: []string{"SCAN", "fleet", "WHEREEVAL",
+				"return FIELDS.speed > tonumber(ARGV[1])", "1", "15", "IDS"},
+		},
+		"whereevalsha accumulates": {
+			run: func(c *Client) error {
+				_, err := c.Within("fleet").WhereEvalSha("abc", 1).WhereEvalSha("def").
+					Bounds(GlobalBounds()).IDs(t.Context())
+				return err
+			},
+			want: []string{"WITHIN", "fleet", "WHEREEVALSHA", "abc", "1", "1",
+				"WHEREEVALSHA", "def", "0", "IDS", "BOUNDS", "-90", "-180", "90", "180"},
+		},
+		"buffer precedes the output format": {
+			run: func(c *Client) error {
+				_, err := c.Intersects("fleet").Buffer(500).Circle(1, 2, 3).IDs(t.Context())
+				return err
+			},
+			want: []string{"INTERSECTS", "fleet", "BUFFER", "500", "IDS", "CIRCLE", "1", "2", "3"},
+		},
+		"sector area": {
+			run: func(c *Client) error {
+				_, err := c.Within("fleet").Sector(33.5, -115.5, 5000, 0, 90).IDs(t.Context())
+				return err
+			},
+			want: []string{"WITHIN", "fleet", "IDS", "SECTOR", "33.5", "-115.5", "5000", "0", "90"},
+		},
+		"hash area": {
+			run: func(c *Client) error {
+				_, err := c.Intersects("fleet").Hash("9mv").Count(t.Context())
+				return err
+			},
+			want: []string{"INTERSECTS", "fleet", "COUNT", "HASH", "9mv"},
+		},
+		"quadkey area": {
+			run: func(c *Client) error {
+				_, err := c.Within("fleet").QuadKey("0231").Count(t.Context())
+				return err
+			},
+			want: []string{"WITHIN", "fleet", "COUNT", "QUADKEY", "0231"},
+		},
+		// An area replaces whatever came before it rather than appending.
+		"last area wins": {
+			run: func(c *Client) error {
+				_, err := c.Within("fleet").Hash("9mv").QuadKey("0231").Count(t.Context())
+				return err
+			},
+			want: []string{"WITHIN", "fleet", "COUNT", "QUADKEY", "0231"},
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			got := make(chan []string, 1)
+			addr := fakeServer(t, func(r *bufio.Reader, w net.Conn) {
+				got <- readCommand(t, r)
+				_, _ = io.WriteString(w, wire("*2", ":0", "*0"))
+			})
+			c := New(addr)
+			defer c.Close()
+
+			_ = tc.run(c)
+			if cmd := <-got; !reflect.DeepEqual(cmd, tc.want) {
+				t.Errorf("command = %q,\n           want %q", cmd, tc.want)
+			}
+		})
+	}
+}
+
+// DISTANCE belongs to the fence clause for the same reason DETECT does: on a
+// plain query it would add a trailing element to every item and shift the shape
+// the parse helpers expect.
+func TestDistanceOnlyOnFence(t *testing.T) {
+	tests := map[string]struct {
+		run  func(*Client) error
+		want []string
+	}{
+		"ignored without fence": {
+			run: func(c *Client) error {
+				_, err := c.Nearby("fleet").Distance().Point(1, 2).Radius(3).Points(t.Context())
+				return err
+			},
+			want: []string{"NEARBY", "fleet", "POINTS", "POINT", "1", "2", "3"},
+		},
+		"rendered on the fence": {
+			run: func(c *Client) error {
+				st, err := c.Nearby("fleet").Distance().Detect(Enter).Point(1, 2).Radius(3).Fence(t.Context())
+				if st != nil {
+					_ = st.Close()
+				}
+				return err
+			},
+			want: []string{"NEARBY", "fleet", "DISTANCE", "FENCE", "DETECT", "enter",
+				"POINT", "1", "2", "3"},
+		},
+		"rendered on a hook": {
+			run: func(c *Client) error {
+				return c.SetChan("zone").Distance().Nearby("fleet").
+					Point(1, 2).Radius(3).Do(t.Context())
+			},
+			want: []string{"SETCHAN", "zone", "NEARBY", "fleet", "DISTANCE", "FENCE",
+				"POINT", "1", "2", "3"},
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			got := make(chan []string, 1)
+			addr := fakeServer(t, func(r *bufio.Reader, w net.Conn) {
+				got <- readCommand(t, r)
+				_, _ = io.WriteString(w, "+OK\r\n")
+			})
+			c := New(addr)
+			defer c.Close()
+
+			_ = tc.run(c)
+			if cmd := <-got; !reflect.DeepEqual(cmd, tc.want) {
+				t.Errorf("command = %q,\n           want %q", cmd, tc.want)
+			}
+		})
+	}
+}

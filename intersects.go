@@ -22,6 +22,7 @@ type IntersectsCmd struct {
 	cursorOut uint64 // cursor from the last executed terminal
 	detect    []DetectState
 	commands  []Command
+	distance  bool
 	geom      []any // search area
 }
 
@@ -96,6 +97,43 @@ func (cmd *IntersectsCmd) Commands(commands ...Command) *IntersectsCmd {
 	return cmd
 }
 
+// Distance adds each object's distance from the fence centre to every event the
+// fence produces, matching Tile38's DISTANCE keyword. It arrives on FenceEvent
+// as Distance, and applies to the live fence only — a plain query reads the same
+// value through PointsWithDistance.
+func (cmd *IntersectsCmd) Distance() *IntersectsCmd {
+	cmd.distance = true
+	return cmd
+}
+
+// WhereEval keeps results for which the given Lua script returns true, matching
+// Tile38's WHEREEVAL keyword. The script sees the object's fields as FIELDS and
+// the extra arguments as ARGV. It accumulates: each call adds another filter.
+func (cmd *IntersectsCmd) WhereEval(script string, args ...any) *IntersectsCmd {
+	cmd.args = append(cmd.args, countedTokens("WHEREEVAL", script, args)...)
+	return cmd
+}
+
+// WhereEvalSha is WhereEval against a script already loaded on the server,
+// matching Tile38's WHEREEVALSHA keyword.
+func (cmd *IntersectsCmd) WhereEvalSha(sha string, args ...any) *IntersectsCmd {
+	cmd.args = append(cmd.args, countedTokens("WHEREEVALSHA", sha, args)...)
+	return cmd
+}
+
+// Buffer grows the search area by the given number of metres before matching,
+// matching Tile38's BUFFER keyword. Tile38 can only buffer point-like areas — it
+// answers "cannot buffer Polygon type" for a Bounds or polygon Object area, and
+// it panics rather than answering on NEARBY, which is why NearbyCmd has no
+// Buffer.
+//
+// It is appended rather than stored: Tile38 has no duplicate guard for BUFFER,
+// so a repeat is legal and the last one wins.
+func (cmd *IntersectsCmd) Buffer(metres int) *IntersectsCmd {
+	cmd.args = append(cmd.args, "BUFFER", metres)
+	return cmd
+}
+
 // Get sets the search area to an object already stored in Tile38 (GET keyword).
 func (cmd *IntersectsCmd) Get(collection, id string) *IntersectsCmd {
 	cmd.geom = []any{"GET", collection, id}
@@ -126,6 +164,28 @@ func (cmd *IntersectsCmd) Circle(lat, lon float64, radius int) *IntersectsCmd {
 // A5 as a search area only, not as a hook or channel fence area.
 func (cmd *IntersectsCmd) A5(cellID string) *IntersectsCmd {
 	cmd.geom = []any{"A5", cellID}
+	return cmd
+}
+
+// Sector sets the search area to a circular sector: a circle of radius metres
+// centred on lat/lon, clipped to the arc between two compass bearings in
+// degrees. Matches Tile38's SECTOR keyword, which NEARBY does not accept.
+func (cmd *IntersectsCmd) Sector(lat, lon float64, metres int, bearing1, bearing2 float64) *IntersectsCmd {
+	cmd.geom = []any{"SECTOR", lat, lon, metres, bearing1, bearing2}
+	return cmd
+}
+
+// Hash sets the search area to the box a geohash covers, matching Tile38's HASH
+// keyword. The shorter the hash, the larger the box.
+func (cmd *IntersectsCmd) Hash(geohash string) *IntersectsCmd {
+	cmd.geom = []any{"HASH", geohash}
+	return cmd
+}
+
+// QuadKey sets the search area to the tile a Bing Maps quadkey names, matching
+// Tile38's QUADKEY keyword. Tile is the same area expressed as x/y/z.
+func (cmd *IntersectsCmd) QuadKey(quadkey string) *IntersectsCmd {
+	cmd.geom = []any{"QUADKEY", quadkey}
 	return cmd
 }
 
@@ -216,6 +276,6 @@ func (cmd *IntersectsCmd) A5Cells(ctx context.Context, level int) ([]A5Result, e
 // is closed or ctx is cancelled.
 func (cmd *IntersectsCmd) Fence(ctx context.Context) (*Stream, error) {
 	args := buildSearch(cmd.args, cmd.opts.fenceOpts(),
-		fenceTokens(cmd.detect, cmd.commands, false), nil, cmd.geom)
+		fenceTokens(cmd.distance, cmd.detect, cmd.commands, false), nil, cmd.geom)
 	return cmd.c.fenceStream(ctx, args)
 }
