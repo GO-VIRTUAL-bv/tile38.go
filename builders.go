@@ -7,6 +7,7 @@ package tile38
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -77,6 +78,7 @@ type searchOpts struct {
 	limit    *int
 	cursor   *uint64
 	sparse   *int
+	order    *string // ASC or DESC; SCAN and SEARCH only
 	nofields bool
 	clip     bool
 }
@@ -113,6 +115,9 @@ func (o searchOpts) tokens() []any {
 	if o.sparse != nil {
 		out = append(out, "SPARSE", *o.sparse)
 	}
+	if o.order != nil {
+		out = append(out, *o.order)
+	}
 	if o.nofields {
 		out = append(out, "NOFIELDS")
 	}
@@ -122,12 +127,17 @@ func (o searchOpts) tokens() []any {
 	return out
 }
 
-// whereInTokens renders WHEREIN, which is length-prefixed:
-// WHEREIN field <count> value…
-func whereInTokens(field string, values []any) []any {
+// countedTokens renders the length-prefixed option shape Tile38 uses for
+// WHEREIN, WHEREEVAL and WHEREEVALSHA alike: <keyword> <subject> <count> value…
+func countedTokens(keyword, subject string, values []any) []any {
 	out := make([]any, 0, len(values)+3)
-	out = append(out, "WHEREIN", field, len(values))
+	out = append(out, keyword, subject, len(values))
 	return append(out, values...)
+}
+
+// whereInTokens renders WHEREIN field <count> value…
+func whereInTokens(field string, values []any) []any {
+	return countedTokens("WHEREIN", field, values)
 }
 
 // buildSearch assembles a search command in the order Tile38's parser requires:
@@ -144,6 +154,53 @@ func buildSearch(args []any, opts searchOpts, fence []any, format []string, geom
 		out = append(out, f)
 	}
 	return append(out, geom...)
+}
+
+// The BOUNDS, HASHES and A5 output formats decode the same way for every search
+// verb, so each gets one runner rather than a copy per builder. cursorOut is the
+// builder's own cursor field, recorded for paging exactly as the older terminals
+// do it.
+
+// searchRects runs a search with the BOUNDS output format.
+func searchRects(ctx context.Context, c *Client, verb string, opts searchOpts, cursorOut *uint64, args []any) ([]RectResult, error) {
+	val, err := c.do(ctx, args...)
+	if err != nil {
+		return nil, fmt.Errorf("tile38: %s BOUNDS: %w", verb, err)
+	}
+	res, cursor, err := parseRects(verb, val)
+	if err != nil {
+		return nil, err
+	}
+	*cursorOut = cursor
+	return res, truncation(opts, cursor)
+}
+
+// searchHashes runs a search with the HASHES output format.
+func searchHashes(ctx context.Context, c *Client, verb string, opts searchOpts, cursorOut *uint64, args []any) ([]HashResult, error) {
+	val, err := c.do(ctx, args...)
+	if err != nil {
+		return nil, fmt.Errorf("tile38: %s HASHES: %w", verb, err)
+	}
+	res, cursor, err := parseHashes(verb, val)
+	if err != nil {
+		return nil, err
+	}
+	*cursorOut = cursor
+	return res, truncation(opts, cursor)
+}
+
+// searchA5Cells runs a search with the A5 output format.
+func searchA5Cells(ctx context.Context, c *Client, verb string, opts searchOpts, cursorOut *uint64, args []any) ([]A5Result, error) {
+	val, err := c.do(ctx, args...)
+	if err != nil {
+		return nil, fmt.Errorf("tile38: %s A5: %w", verb, err)
+	}
+	res, cursor, err := parseA5Cells(verb, val)
+	if err != nil {
+		return nil, err
+	}
+	*cursorOut = cursor
+	return res, truncation(opts, cursor)
 }
 
 // pointGeometry appends the trailing metres of Tile38's "POINT lat lon meters",
@@ -170,9 +227,15 @@ func hookHead(head []any, meta [][2]string, ex *int) []any {
 }
 
 // fenceTokens renders the FENCE clause. DETECT and COMMANDS are single-use in
-// Tile38, so they are stored as values and rendered once here.
-func fenceTokens(detect []DetectState, commands []Command, nodwell bool) []any {
-	out := make([]any, 0, 6)
+// Tile38, so they are stored as values and rendered once here. DISTANCE is an
+// option rather than part of the clause, so it precedes FENCE — and it is
+// rendered here, alongside DETECT, precisely so it can never leak onto a plain
+// query, where the trailing distance it adds would shift every item's shape.
+func fenceTokens(distance bool, detect []DetectState, commands []Command, nodwell bool) []any {
+	out := make([]any, 0, 7)
+	if distance {
+		out = append(out, "DISTANCE")
+	}
 	out = append(out, "FENCE")
 	if nodwell {
 		out = append(out, "NODWELL")
@@ -226,6 +289,14 @@ func (cmd *SetCmd) Fields(fields ...field) *SetCmd {
 	for _, f := range fields {
 		cmd.args = append(cmd.args, "FIELD", f.name, f.value)
 	}
+	return cmd
+}
+
+// PointZ stores the object as a POINT carrying a third ordinate, which Tile38
+// keeps and hands back through PointZ and NearbyResult.Z. A z of zero is stored
+// as a plain two-dimensional point.
+func (cmd *SetCmd) PointZ(lat, lon, z float64) *SetCmd {
+	cmd.args = append(cmd.args, "POINT", lat, lon, z)
 	return cmd
 }
 
@@ -337,8 +408,53 @@ func (cmd *FGetCmd) Do(ctx context.Context) (string, error) {
 
 // GetCmd builds a Tile38 GET command.
 type GetCmd struct {
-	c    *Client
-	args []any
+	c          *Client
+	args       []any
+	withFields bool
+	fields     Fields // recorded by the last terminal when WithFields is set
+}
+
+// WithFields asks for the object's fields alongside its geometry, matching
+// Tile38's WITHFIELDS keyword. It applies to every output format; read the
+// fields with Fields once the terminal has returned:
+//
+//	g := c.Get("fleet", "truck1").WithFields()
+//	lat, lon, err := g.Point(ctx)
+//	speed := g.Fields()["speed"]
+//
+// One GET then answers what would otherwise take an FGet per field.
+func (cmd *GetCmd) WithFields() *GetCmd {
+	cmd.withFields = true
+	return cmd
+}
+
+// Fields returns the fields read by the most recent terminal. It is nil until a
+// terminal has run, when WithFields was not chained, or when the object has no
+// non-zero fields — Tile38 omits the fields element entirely in that case.
+func (cmd *GetCmd) Fields() Fields { return cmd.fields }
+
+// exec runs the GET and unwraps the envelope WITHFIELDS puts around the reply:
+// [value] for an object with no non-zero fields and [value, [name, val, …]]
+// otherwise. Doing it here is what lets every output format carry fields.
+func (cmd *GetCmd) exec(ctx context.Context, format ...any) (any, error) {
+	args := make([]any, 0, len(cmd.args)+len(format)+1)
+	args = append(args, cmd.args...)
+	if cmd.withFields {
+		args = append(args, "WITHFIELDS")
+	}
+	val, err := cmd.c.do(ctx, append(args, format...)...)
+	if err != nil || !cmd.withFields || val == nil {
+		return val, err
+	}
+	outer, ok := val.([]any)
+	if !ok || len(outer) == 0 {
+		return nil, fmt.Errorf("tile38: GET WITHFIELDS: unexpected response shape: %T", val)
+	}
+	cmd.fields = nil
+	if len(outer) > 1 {
+		cmd.fields = parseFields(outer[1])
+	}
+	return outer[0], nil
 }
 
 // Point executes: GET collection id POINT — returns the lat/lon of the object.
@@ -351,7 +467,7 @@ func (cmd *GetCmd) Point(ctx context.Context) (lat, lon float64, err error) {
 // PointZ executes: GET collection id POINT — returns the lat/lon of the object
 // along with its third ordinate, which Tile38 appends only when it is non-zero.
 func (cmd *GetCmd) PointZ(ctx context.Context) (lat, lon, z float64, err error) {
-	val, err := cmd.c.do(ctx, append(cmd.args, "POINT")...)
+	val, err := cmd.exec(ctx, "POINT")
 	if err != nil {
 		return 0, 0, 0, fmt.Errorf("tile38: GET POINT: %w", err)
 	}
@@ -360,7 +476,7 @@ func (cmd *GetCmd) PointZ(ctx context.Context) (lat, lon, z float64, err error) 
 
 // Object executes: GET collection id — returns the raw GeoJSON string.
 func (cmd *GetCmd) Object(ctx context.Context) (string, error) {
-	val, err := cmd.c.do(ctx, cmd.args...)
+	val, err := cmd.exec(ctx)
 	if err != nil {
 		return "", fmt.Errorf("tile38: GET: %w", err)
 	}
@@ -373,7 +489,7 @@ func (cmd *GetCmd) Object(ctx context.Context) (string, error) {
 
 // Bounds executes: GET collection id BOUNDS — returns the bounding box of the object.
 func (cmd *GetCmd) Bounds(ctx context.Context) (BoundsResult, error) {
-	val, err := cmd.c.do(ctx, append(cmd.args, "BOUNDS")...)
+	val, err := cmd.exec(ctx, "BOUNDS")
 	if err != nil {
 		return BoundsResult{}, fmt.Errorf("tile38: GET BOUNDS: %w", err)
 	}
@@ -382,7 +498,7 @@ func (cmd *GetCmd) Bounds(ctx context.Context) (BoundsResult, error) {
 
 // Hash executes: GET collection id HASH precision — returns the geohash at the given precision.
 func (cmd *GetCmd) Hash(ctx context.Context, precision int) (string, error) {
-	val, err := cmd.c.do(ctx, append(cmd.args, "HASH", precision)...)
+	val, err := cmd.exec(ctx, "HASH", precision)
 	if err != nil {
 		return "", fmt.Errorf("tile38: GET HASH: %w", err)
 	}
@@ -398,7 +514,7 @@ func (cmd *GetCmd) Hash(ctx context.Context, precision int) (string, error) {
 // take as their area. Requires a server built from upstream master: A5 is
 // merged upstream but has shipped in no release tag as of 1.38.0.
 func (cmd *GetCmd) A5(ctx context.Context, level int) (string, error) {
-	val, err := cmd.c.do(ctx, append(cmd.args, "A5", level)...)
+	val, err := cmd.exec(ctx, "A5", level)
 	if err != nil {
 		return "", fmt.Errorf("tile38: GET A5: %w", err)
 	}
@@ -421,6 +537,7 @@ type NearbyCmd struct {
 	detect    []DetectState
 	commands  []Command
 	nodwell   bool
+	distance  bool
 	geom      []any // POINT lat lon, or ROAM key pattern metres
 	radius    *int  // trailing radius, in metres
 }
@@ -486,6 +603,30 @@ func (cmd *NearbyCmd) Detect(states ...DetectState) *NearbyCmd {
 // Only meaningful with Fence.
 func (cmd *NearbyCmd) Commands(commands ...Command) *NearbyCmd {
 	cmd.commands = commands
+	return cmd
+}
+
+// Distance adds each object's distance from the fence centre to every event the
+// fence produces, matching Tile38's DISTANCE keyword. It arrives on FenceEvent
+// as Distance, and applies to the live fence only — a plain query reads the same
+// value through PointsWithDistance.
+func (cmd *NearbyCmd) Distance() *NearbyCmd {
+	cmd.distance = true
+	return cmd
+}
+
+// WhereEval keeps results for which the given Lua script returns true, matching
+// Tile38's WHEREEVAL keyword. The script sees the object's fields as FIELDS and
+// the extra arguments as ARGV. It accumulates: each call adds another filter.
+func (cmd *NearbyCmd) WhereEval(script string, args ...any) *NearbyCmd {
+	cmd.args = append(cmd.args, countedTokens("WHEREEVAL", script, args)...)
+	return cmd
+}
+
+// WhereEvalSha is WhereEval against a script already loaded on the server,
+// matching Tile38's WHEREEVALSHA keyword.
+func (cmd *NearbyCmd) WhereEvalSha(sha string, args ...any) *NearbyCmd {
+	cmd.args = append(cmd.args, countedTokens("WHEREEVALSHA", sha, args)...)
 	return cmd
 }
 
@@ -595,12 +736,32 @@ func (cmd *NearbyCmd) Objects(ctx context.Context) ([]SearchObject, error) {
 	return res, truncation(cmd.opts, cursor)
 }
 
+// Rects executes: NEARBY collection [opts] BOUNDS POINT lat lon radius
+// Each result is the bounding box of a matching object, lat first.
+func (cmd *NearbyCmd) Rects(ctx context.Context) ([]RectResult, error) {
+	return searchRects(ctx, cmd.c, "NEARBY", cmd.opts, &cmd.cursorOut, cmd.execArgs("BOUNDS"))
+}
+
+// Hashes executes: NEARBY collection [opts] HASHES precision POINT lat lon radius
+// Each result is the geohash of a matching object's centre.
+func (cmd *NearbyCmd) Hashes(ctx context.Context, precision int) ([]HashResult, error) {
+	return searchHashes(ctx, cmd.c, "NEARBY", cmd.opts, &cmd.cursorOut, cmd.execArgs("HASHES", strconv.Itoa(precision)))
+}
+
+// A5Cells executes: NEARBY collection [opts] A5 level POINT lat lon radius
+// Each result is the A5 cell a matching object's centre falls in. Named for the
+// output rather than the keyword because A5 is already the search-area method on
+// the builders that take one. Requires a server built from upstream master.
+func (cmd *NearbyCmd) A5Cells(ctx context.Context, level int) ([]A5Result, error) {
+	return searchA5Cells(ctx, cmd.c, "NEARBY", cmd.opts, &cmd.cursorOut, cmd.execArgs("A5", strconv.Itoa(level)))
+}
+
 // Fence opens a live geofence: NEARBY collection [opts] FENCE [DETECT …] POINT lat lon radius.
 // The returned Stream holds a dedicated connection and delivers events until it
 // is closed or ctx is cancelled.
 func (cmd *NearbyCmd) Fence(ctx context.Context) (*Stream, error) {
 	args := buildSearch(cmd.args, cmd.opts.fenceOpts(),
-		fenceTokens(cmd.detect, cmd.commands, cmd.nodwell), nil, cmd.geometry())
+		fenceTokens(cmd.distance, cmd.detect, cmd.commands, cmd.nodwell), nil, cmd.geometry())
 	return cmd.c.fenceStream(ctx, args)
 }
 
@@ -654,6 +815,39 @@ func (cmd *ScanCmd) WhereIn(field string, values ...any) *ScanCmd {
 // SCAN takes no SPARSE — Tile38 rejects it for this command.
 func (cmd *ScanCmd) NoFields() *ScanCmd {
 	cmd.opts.nofields = true
+	return cmd
+}
+
+// Asc returns results in ascending ID order, matching Tile38's ASC keyword.
+// Only SCAN and SEARCH take an order — the spatial verbs answer
+// "ASC is not allowed for NEARBY". Asc and Desc overwrite each other: Tile38
+// rejects a command carrying both.
+func (cmd *ScanCmd) Asc() *ScanCmd {
+	order := "ASC"
+	cmd.opts.order = &order
+	return cmd
+}
+
+// Desc returns results in descending ID order, matching Tile38's DESC keyword.
+// See Asc for why it is single-use.
+func (cmd *ScanCmd) Desc() *ScanCmd {
+	order := "DESC"
+	cmd.opts.order = &order
+	return cmd
+}
+
+// WhereEval keeps results for which the given Lua script returns true, matching
+// Tile38's WHEREEVAL keyword. The script sees the object's fields as FIELDS and
+// the extra arguments as ARGV. It accumulates: each call adds another filter.
+func (cmd *ScanCmd) WhereEval(script string, args ...any) *ScanCmd {
+	cmd.args = append(cmd.args, countedTokens("WHEREEVAL", script, args)...)
+	return cmd
+}
+
+// WhereEvalSha is WhereEval against a script already loaded on the server,
+// matching Tile38's WHEREEVALSHA keyword.
+func (cmd *ScanCmd) WhereEvalSha(sha string, args ...any) *ScanCmd {
+	cmd.args = append(cmd.args, countedTokens("WHEREEVALSHA", sha, args)...)
 	return cmd
 }
 
@@ -714,6 +908,171 @@ func (cmd *ScanCmd) Objects(ctx context.Context) ([]SearchObject, error) {
 	return res, truncation(cmd.opts, cursor)
 }
 
+// Rects executes: SCAN collection [opts] BOUNDS
+// Each result is the bounding box of a matching object, lat first.
+func (cmd *ScanCmd) Rects(ctx context.Context) ([]RectResult, error) {
+	return searchRects(ctx, cmd.c, "SCAN", cmd.opts, &cmd.cursorOut, cmd.execArgs("BOUNDS"))
+}
+
+// Hashes executes: SCAN collection [opts] HASHES precision
+// Each result is the geohash of a matching object's centre.
+func (cmd *ScanCmd) Hashes(ctx context.Context, precision int) ([]HashResult, error) {
+	return searchHashes(ctx, cmd.c, "SCAN", cmd.opts, &cmd.cursorOut, cmd.execArgs("HASHES", strconv.Itoa(precision)))
+}
+
+// A5Cells executes: SCAN collection [opts] A5 level
+// Each result is the A5 cell a matching object's centre falls in. Named for the
+// output rather than the keyword because A5 is already the search-area method on
+// the builders that take one. Requires a server built from upstream master.
+func (cmd *ScanCmd) A5Cells(ctx context.Context, level int) ([]A5Result, error) {
+	return searchA5Cells(ctx, cmd.c, "SCAN", cmd.opts, &cmd.cursorOut, cmd.execArgs("A5", strconv.Itoa(level)))
+}
+
+// SearchCmd builds a Tile38 SEARCH command, which matches on the string values
+// "SET … STRING" stores rather than on geometry. It takes no area and no fence.
+type SearchCmd struct {
+	c         *Client
+	args      []any // verb, key, and repeatable options
+	opts      searchOpts
+	cursorOut uint64 // cursor from the last executed terminal
+}
+
+// Limit caps the number of results. Zero means no limit.
+func (cmd *SearchCmd) Limit(n int) *SearchCmd {
+	cmd.opts.limit = &n
+	return cmd
+}
+
+// Cursor resumes a search from where a previous one stopped, matching Tile38's
+// CURSOR keyword. Pass the value NextCursor reported.
+func (cmd *SearchCmd) Cursor(n uint64) *SearchCmd {
+	cmd.opts.cursor = &n
+	return cmd
+}
+
+// NextCursor reports where to resume after the last executed terminal. It is
+// non-zero only when Tile38 stopped at the limit with more objects matching.
+func (cmd *SearchCmd) NextCursor() uint64 { return cmd.cursorOut }
+
+// Match filters results by string value (glob-style, e.g. "*hello*"), matching
+// Tile38's MATCH keyword. It accumulates: each call adds another pattern.
+func (cmd *SearchCmd) Match(pattern string) *SearchCmd {
+	cmd.args = append(cmd.args, "MATCH", pattern)
+	return cmd
+}
+
+// Asc returns results in ascending order, matching Tile38's ASC keyword. Asc and
+// Desc overwrite each other: Tile38 rejects a command carrying both.
+func (cmd *SearchCmd) Asc() *SearchCmd {
+	order := "ASC"
+	cmd.opts.order = &order
+	return cmd
+}
+
+// Desc returns results in descending order, matching Tile38's DESC keyword.
+func (cmd *SearchCmd) Desc() *SearchCmd {
+	order := "DESC"
+	cmd.opts.order = &order
+	return cmd
+}
+
+// Where sets an optional Tile38 field expression filter.
+func (cmd *SearchCmd) Where(expr string) *SearchCmd {
+	cmd.args = append(cmd.args, "WHERE", expr)
+	return cmd
+}
+
+// WhereIn keeps results whose field holds one of the given values, matching
+// Tile38's WHEREIN keyword. It accumulates: each call adds another filter.
+func (cmd *SearchCmd) WhereIn(field string, values ...any) *SearchCmd {
+	cmd.args = append(cmd.args, whereInTokens(field, values)...)
+	return cmd
+}
+
+// WhereEval keeps results for which the given Lua script returns true, matching
+// Tile38's WHEREEVAL keyword. It accumulates: each call adds another filter.
+func (cmd *SearchCmd) WhereEval(script string, args ...any) *SearchCmd {
+	cmd.args = append(cmd.args, countedTokens("WHEREEVAL", script, args)...)
+	return cmd
+}
+
+// WhereEvalSha is WhereEval against a script already loaded on the server,
+// matching Tile38's WHEREEVALSHA keyword.
+func (cmd *SearchCmd) WhereEvalSha(sha string, args ...any) *SearchCmd {
+	cmd.args = append(cmd.args, countedTokens("WHEREEVALSHA", sha, args)...)
+	return cmd
+}
+
+// NoFields drops field values from the reply, matching Tile38's NOFIELDS keyword.
+func (cmd *SearchCmd) NoFields() *SearchCmd {
+	cmd.opts.nofields = true
+	return cmd
+}
+
+func (cmd *SearchCmd) execArgs(format ...string) []any {
+	return buildSearch(cmd.args, cmd.opts, nil, format, nil)
+}
+
+// IDs executes: SEARCH collection [opts] IDS
+func (cmd *SearchCmd) IDs(ctx context.Context) ([]string, error) {
+	val, err := cmd.c.do(ctx, cmd.execArgs("IDS")...)
+	if err != nil {
+		return nil, fmt.Errorf("tile38: SEARCH IDs: %w", err)
+	}
+	res, cursor, err := parseScanIDs(val)
+	if err != nil {
+		return nil, err
+	}
+	cmd.cursorOut = cursor
+	return res, truncation(cmd.opts, cursor)
+}
+
+// Count executes: SEARCH collection [opts] COUNT
+func (cmd *SearchCmd) Count(ctx context.Context) (int, error) {
+	val, err := cmd.c.do(ctx, cmd.execArgs("COUNT")...)
+	if err != nil {
+		return 0, fmt.Errorf("tile38: SEARCH COUNT: %w", err)
+	}
+	return parseCount("SEARCH", val)
+}
+
+// Strings executes: SEARCH collection [opts] — the default output, which pairs
+// each id with the string value that matched. Tile38 has no keyword for it, so
+// the method is named for what it returns.
+func (cmd *SearchCmd) Strings(ctx context.Context) ([]StringObject, error) {
+	val, err := cmd.c.do(ctx, cmd.execArgs()...)
+	if err != nil {
+		return nil, fmt.Errorf("tile38: SEARCH: %w", err)
+	}
+	res, cursor, err := parseStrings("SEARCH", val)
+	if err != nil {
+		return nil, err
+	}
+	cmd.cursorOut = cursor
+	return res, truncation(cmd.opts, cursor)
+}
+
+// FExistsCmd builds a Tile38 FEXISTS command.
+type FExistsCmd struct {
+	c    *Client
+	args []any
+}
+
+// Do executes: FEXISTS collection id field — reports whether the field is set on
+// the object. Unlike FGet, this distinguishes a missing field from one holding
+// the zero value.
+func (cmd *FExistsCmd) Do(ctx context.Context) (bool, error) {
+	val, err := cmd.c.do(ctx, cmd.args...)
+	if err != nil {
+		return false, fmt.Errorf("tile38: FEXISTS: %w", err)
+	}
+	n, err := toInt64("FEXISTS", val)
+	if err != nil {
+		return false, err
+	}
+	return n == 1, nil
+}
+
 // WithinCmd builds a Tile38 WITHIN query. Methods may be chained in any order;
 // the parts are assembled into protocol order when the command runs.
 type WithinCmd struct {
@@ -723,6 +1082,7 @@ type WithinCmd struct {
 	cursorOut uint64 // cursor from the last executed terminal
 	detect    []DetectState
 	commands  []Command
+	distance  bool
 	geom      []any // search area
 }
 
@@ -797,6 +1157,43 @@ func (cmd *WithinCmd) Commands(commands ...Command) *WithinCmd {
 	return cmd
 }
 
+// Distance adds each object's distance from the fence centre to every event the
+// fence produces, matching Tile38's DISTANCE keyword. It arrives on FenceEvent
+// as Distance, and applies to the live fence only — a plain query reads the same
+// value through PointsWithDistance.
+func (cmd *WithinCmd) Distance() *WithinCmd {
+	cmd.distance = true
+	return cmd
+}
+
+// WhereEval keeps results for which the given Lua script returns true, matching
+// Tile38's WHEREEVAL keyword. The script sees the object's fields as FIELDS and
+// the extra arguments as ARGV. It accumulates: each call adds another filter.
+func (cmd *WithinCmd) WhereEval(script string, args ...any) *WithinCmd {
+	cmd.args = append(cmd.args, countedTokens("WHEREEVAL", script, args)...)
+	return cmd
+}
+
+// WhereEvalSha is WhereEval against a script already loaded on the server,
+// matching Tile38's WHEREEVALSHA keyword.
+func (cmd *WithinCmd) WhereEvalSha(sha string, args ...any) *WithinCmd {
+	cmd.args = append(cmd.args, countedTokens("WHEREEVALSHA", sha, args)...)
+	return cmd
+}
+
+// Buffer grows the search area by the given number of metres before matching,
+// matching Tile38's BUFFER keyword. Tile38 can only buffer point-like areas — it
+// answers "cannot buffer Polygon type" for a Bounds or polygon Object area, and
+// it panics rather than answering on NEARBY, which is why NearbyCmd has no
+// Buffer.
+//
+// It is appended rather than stored: Tile38 has no duplicate guard for BUFFER,
+// so a repeat is legal and the last one wins.
+func (cmd *WithinCmd) Buffer(metres int) *WithinCmd {
+	cmd.args = append(cmd.args, "BUFFER", metres)
+	return cmd
+}
+
 // Get sets the search area to an object already stored in Tile38 (GET keyword).
 func (cmd *WithinCmd) Get(collection, id string) *WithinCmd {
 	cmd.geom = []any{"GET", collection, id}
@@ -827,6 +1224,28 @@ func (cmd *WithinCmd) Circle(lat, lon float64, radius int) *WithinCmd {
 // A5 as a search area only, not as a hook or channel fence area.
 func (cmd *WithinCmd) A5(cellID string) *WithinCmd {
 	cmd.geom = []any{"A5", cellID}
+	return cmd
+}
+
+// Sector sets the search area to a circular sector: a circle of radius metres
+// centred on lat/lon, clipped to the arc between two compass bearings in
+// degrees. Matches Tile38's SECTOR keyword, which NEARBY does not accept.
+func (cmd *WithinCmd) Sector(lat, lon float64, metres int, bearing1, bearing2 float64) *WithinCmd {
+	cmd.geom = []any{"SECTOR", lat, lon, metres, bearing1, bearing2}
+	return cmd
+}
+
+// Hash sets the search area to the box a geohash covers, matching Tile38's HASH
+// keyword. The shorter the hash, the larger the box.
+func (cmd *WithinCmd) Hash(geohash string) *WithinCmd {
+	cmd.geom = []any{"HASH", geohash}
+	return cmd
+}
+
+// QuadKey sets the search area to the tile a Bing Maps quadkey names, matching
+// Tile38's QUADKEY keyword. Tile is the same area expressed as x/y/z.
+func (cmd *WithinCmd) QuadKey(quadkey string) *WithinCmd {
+	cmd.geom = []any{"QUADKEY", quadkey}
 	return cmd
 }
 
@@ -892,12 +1311,32 @@ func (cmd *WithinCmd) Objects(ctx context.Context) ([]SearchObject, error) {
 	return res, truncation(cmd.opts, cursor)
 }
 
+// Rects executes: WITHIN collection [opts] BOUNDS <area>
+// Each result is the bounding box of a matching object, lat first.
+func (cmd *WithinCmd) Rects(ctx context.Context) ([]RectResult, error) {
+	return searchRects(ctx, cmd.c, "WITHIN", cmd.opts, &cmd.cursorOut, cmd.execArgs("BOUNDS"))
+}
+
+// Hashes executes: WITHIN collection [opts] HASHES precision <area>
+// Each result is the geohash of a matching object's centre.
+func (cmd *WithinCmd) Hashes(ctx context.Context, precision int) ([]HashResult, error) {
+	return searchHashes(ctx, cmd.c, "WITHIN", cmd.opts, &cmd.cursorOut, cmd.execArgs("HASHES", strconv.Itoa(precision)))
+}
+
+// A5Cells executes: WITHIN collection [opts] A5 level <area>
+// Each result is the A5 cell a matching object's centre falls in. Named for the
+// output rather than the keyword because A5 is already the search-area method on
+// the builders that take one. Requires a server built from upstream master.
+func (cmd *WithinCmd) A5Cells(ctx context.Context, level int) ([]A5Result, error) {
+	return searchA5Cells(ctx, cmd.c, "WITHIN", cmd.opts, &cmd.cursorOut, cmd.execArgs("A5", strconv.Itoa(level)))
+}
+
 // Fence opens a live geofence: WITHIN collection [opts] FENCE [DETECT …] area.
 // The returned Stream holds a dedicated connection and delivers events until it
 // is closed or ctx is cancelled.
 func (cmd *WithinCmd) Fence(ctx context.Context) (*Stream, error) {
 	args := buildSearch(cmd.args, cmd.opts.fenceOpts(),
-		fenceTokens(cmd.detect, cmd.commands, false), nil, cmd.geom)
+		fenceTokens(cmd.distance, cmd.detect, cmd.commands, false), nil, cmd.geom)
 	return cmd.c.fenceStream(ctx, args)
 }
 
@@ -963,6 +1402,7 @@ type HookCmd struct {
 	detect    []DetectState
 	commands  []Command
 	nodwell   bool
+	distance  bool
 	geom      []any // fence area
 	radius    *int  // trailing metres of a POINT area
 }
@@ -1064,6 +1504,15 @@ func (cmd *HookCmd) NoDwell() *HookCmd {
 	return cmd
 }
 
+// Distance adds each object's distance from the fence centre to every event the
+// fence produces, matching Tile38's DISTANCE keyword. It arrives on FenceEvent
+// as Distance, and applies to the live fence only — a plain query reads the same
+// value through PointsWithDistance.
+func (cmd *HookCmd) Distance() *HookCmd {
+	cmd.distance = true
+	return cmd
+}
+
 // Bounds sets the fence area to a lat/lon bounding box. Pass GlobalBounds() to
 // fence the whole world.
 func (cmd *HookCmd) Bounds(swLat, swLon, neLat, neLon float64) *HookCmd {
@@ -1099,6 +1548,28 @@ func (cmd *HookCmd) Object(geojson string) *HookCmd {
 	return cmd
 }
 
+// Sector sets the search area to a circular sector: a circle of radius metres
+// centred on lat/lon, clipped to the arc between two compass bearings in
+// degrees. Matches Tile38's SECTOR keyword, which NEARBY does not accept.
+func (cmd *HookCmd) Sector(lat, lon float64, metres int, bearing1, bearing2 float64) *HookCmd {
+	cmd.geom = []any{"SECTOR", lat, lon, metres, bearing1, bearing2}
+	return cmd
+}
+
+// Hash sets the search area to the box a geohash covers, matching Tile38's HASH
+// keyword. The shorter the hash, the larger the box.
+func (cmd *HookCmd) Hash(geohash string) *HookCmd {
+	cmd.geom = []any{"HASH", geohash}
+	return cmd
+}
+
+// QuadKey sets the search area to the tile a Bing Maps quadkey names, matching
+// Tile38's QUADKEY keyword. Tile is the same area expressed as x/y/z.
+func (cmd *HookCmd) QuadKey(quadkey string) *HookCmd {
+	cmd.geom = []any{"QUADKEY", quadkey}
+	return cmd
+}
+
 // Get sets the fence area to an object already stored in Tile38.
 func (cmd *HookCmd) Get(collection, id string) *HookCmd {
 	cmd.geom = []any{"GET", collection, id}
@@ -1110,7 +1581,7 @@ func (cmd *HookCmd) Do(ctx context.Context) error {
 	head := hookHead([]any{"SETHOOK", cmd.name, strings.Join(cmd.endpoints, ",")}, cmd.meta, cmd.ex)
 	head = append(head, cmd.trigger...)
 	args := buildSearch(append(head, cmd.args...), searchOpts{},
-		fenceTokens(cmd.detect, cmd.commands, cmd.nodwell), nil,
+		fenceTokens(cmd.distance, cmd.detect, cmd.commands, cmd.nodwell), nil,
 		pointGeometry(cmd.geom, cmd.radius))
 	if _, err := cmd.c.do(ctx, args...); err != nil {
 		return fmt.Errorf("tile38: SETHOOK: %w", err)
@@ -1180,6 +1651,12 @@ func (cmd *PipelineSetCmd) Fields(fields ...field) *PipelineSetCmd {
 	for _, f := range fields {
 		cmd.args = append(cmd.args, "FIELD", f.name, f.value)
 	}
+	return cmd
+}
+
+// PointZ sets the POINT coordinates with a third ordinate. See SetCmd.PointZ.
+func (cmd *PipelineSetCmd) PointZ(lat, lon, z float64) *PipelineSetCmd {
+	cmd.args = append(cmd.args, "POINT", lat, lon, z)
 	return cmd
 }
 

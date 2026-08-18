@@ -1043,3 +1043,544 @@ func TestPointsDecodeZ(t *testing.T) {
 		}
 	})
 }
+
+// WITHFIELDS wraps the reply in an envelope whose second element is the fields,
+// and which Tile38 emits with a single element when the object has no non-zero
+// fields. Every output format has to unwrap both shapes.
+func TestGetWithFields(t *testing.T) {
+	const point = "*2\r\n$4\r\n51.2\r\n$3\r\n4.4"
+
+	tests := map[string]struct {
+		reply      string
+		wantFields Fields
+	}{
+		"fields present": {
+			reply:      "*2\r\n" + point + "\r\n*2\r\n$5\r\nspeed\r\n$2\r\n42\r\n",
+			wantFields: Fields{"speed": "42"},
+		},
+		// Tile38 drops the fields element entirely for an all-zero object.
+		"no fields element": {
+			reply:      "*1\r\n" + point + "\r\n",
+			wantFields: nil,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			got := make(chan []string, 1)
+			addr := fakeServer(t, func(r *bufio.Reader, w net.Conn) {
+				got <- readCommand(t, r)
+				_, _ = io.WriteString(w, tc.reply)
+			})
+			c := New(addr)
+			defer c.Close()
+
+			g := c.Get("fleet", "truck1").WithFields()
+			lat, lon, err := g.Point(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := []string{"GET", "fleet", "truck1", "WITHFIELDS", "POINT"}
+			if cmd := <-got; !reflect.DeepEqual(cmd, want) {
+				t.Errorf("command = %q, want %q", cmd, want)
+			}
+			if lat != 51.2 || lon != 4.4 {
+				t.Errorf("point = %v,%v, want 51.2,4.4", lat, lon)
+			}
+			if !reflect.DeepEqual(g.Fields(), tc.wantFields) {
+				t.Errorf("fields = %v, want %v", g.Fields(), tc.wantFields)
+			}
+		})
+	}
+
+	// Without WithFields the reply is unwrapped, so no envelope is expected.
+	t.Run("not requested", func(t *testing.T) {
+		got := make(chan []string, 1)
+		addr := fakeServer(t, func(r *bufio.Reader, w net.Conn) {
+			got <- readCommand(t, r)
+			_, _ = io.WriteString(w, point+"\r\n")
+		})
+		c := New(addr)
+		defer c.Close()
+
+		g := c.Get("fleet", "truck1")
+		if _, _, err := g.Point(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		want := []string{"GET", "fleet", "truck1", "POINT"}
+		if cmd := <-got; !reflect.DeepEqual(cmd, want) {
+			t.Errorf("command = %q, want %q", cmd, want)
+		}
+		if g.Fields() != nil {
+			t.Errorf("fields = %v, want nil", g.Fields())
+		}
+	})
+}
+
+// BOUNDS, HASHES and A5 are output formats, so they sit between the options and
+// the search area — a chain that appended them would put the geometry in the
+// wrong slot and malform the command.
+func TestOutputFormatTokenOrder(t *testing.T) {
+	tests := map[string]struct {
+		run   func(*Client) error
+		want  []string
+		reply string
+	}{
+		"bounds": {
+			run: func(c *Client) error {
+				_, err := c.Nearby("fleet").Limit(5).Point(33.5, -115.5).Radius(100).Rects(t.Context())
+				return err
+			},
+			want: []string{"NEARBY", "fleet", "LIMIT", "5", "BOUNDS", "POINT", "33.5", "-115.5", "100"},
+		},
+		"hashes": {
+			run: func(c *Client) error {
+				_, err := c.Within("fleet").Bounds(GlobalBounds()).Hashes(t.Context(), 6)
+				return err
+			},
+			want: []string{"WITHIN", "fleet", "HASHES", "6", "BOUNDS", "-90", "-180", "90", "180"},
+		},
+		"a5": {
+			run: func(c *Client) error {
+				_, err := c.Intersects("fleet").Circle(1, 2, 3).A5Cells(t.Context(), 8)
+				return err
+			},
+			want: []string{"INTERSECTS", "fleet", "A5", "8", "CIRCLE", "1", "2", "3"},
+		},
+		"scan bounds": {
+			run: func(c *Client) error {
+				_, err := c.Scan("fleet").Match("truck:*").Rects(t.Context())
+				return err
+			},
+			want: []string{"SCAN", "fleet", "MATCH", "truck:*", "BOUNDS"},
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			got := make(chan []string, 1)
+			addr := fakeServer(t, func(r *bufio.Reader, w net.Conn) {
+				got <- readCommand(t, r)
+				_, _ = io.WriteString(w, wire("*2", ":0", "*0"))
+			})
+			c := New(addr)
+			defer c.Close()
+
+			if err := tc.run(c); err != nil {
+				t.Fatal(err)
+			}
+			if cmd := <-got; !reflect.DeepEqual(cmd, tc.want) {
+				t.Errorf("command = %q,\n           want %q", cmd, tc.want)
+			}
+		})
+	}
+}
+
+// BOUNDS items nest a corner pair inside the item and carry fields after it;
+// HASHES and A5 are flat. A5 is the one output Tile38 attaches no fields to.
+func TestOutputFormatDecoding(t *testing.T) {
+	t.Run("rects", func(t *testing.T) {
+		reply := wire("*2", ":0", "*1",
+			"*3", "$1", "a",
+			"*2", "*2", "$4", "51.1", "$3", "4.1", "*2", "$4", "51.3", "$3", "4.3",
+			"*2", "$5", "speed", "$2", "42")
+		addr := fakeServer(t, func(r *bufio.Reader, w net.Conn) {
+			_ = readCommand(t, r)
+			_, _ = io.WriteString(w, reply)
+		})
+		c := New(addr)
+		defer c.Close()
+
+		res, err := c.Scan("fleet").Rects(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := []RectResult{{
+			ID:     "a",
+			Bounds: BoundsResult{SW: [2]float64{51.1, 4.1}, NE: [2]float64{51.3, 4.3}},
+			Fields: Fields{"speed": "42"},
+		}}
+		if !reflect.DeepEqual(res, want) {
+			t.Errorf("rects = %+v, want %+v", res, want)
+		}
+	})
+
+	t.Run("hashes", func(t *testing.T) {
+		reply := wire("*2", ":0", "*1", "*3", "$1", "a", "$6", "9mvyed", "*2", "$5", "speed", "$2", "42")
+		addr := fakeServer(t, func(r *bufio.Reader, w net.Conn) {
+			_ = readCommand(t, r)
+			_, _ = io.WriteString(w, reply)
+		})
+		c := New(addr)
+		defer c.Close()
+
+		res, err := c.Scan("fleet").Hashes(t.Context(), 6)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := []HashResult{{ID: "a", Hash: "9mvyed", Fields: Fields{"speed": "42"}}}
+		if !reflect.DeepEqual(res, want) {
+			t.Errorf("hashes = %+v, want %+v", res, want)
+		}
+	})
+
+	t.Run("a5 cells", func(t *testing.T) {
+		reply := wire("*2", ":0", "*1", "*2", "$1", "a", "$16", "1970980000000000")
+		addr := fakeServer(t, func(r *bufio.Reader, w net.Conn) {
+			_ = readCommand(t, r)
+			_, _ = io.WriteString(w, reply)
+		})
+		c := New(addr)
+		defer c.Close()
+
+		res, err := c.Scan("fleet").A5Cells(t.Context(), 8)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := []A5Result{{ID: "a", Cell: "1970980000000000"}}
+		if !reflect.DeepEqual(res, want) {
+			t.Errorf("a5 cells = %+v, want %+v", res, want)
+		}
+	})
+}
+
+// The option and area tokens added alongside the output formats. Each is checked
+// for the slot it lands in, since a token in the wrong section malforms the
+// command rather than erroring in an obvious way.
+func TestOptionAndAreaTokens(t *testing.T) {
+	tests := map[string]struct {
+		run  func(*Client) error
+		want []string
+	}{
+		// ASC and DESC overwrite: Tile38 rejects a command carrying both.
+		"scan order overwrites": {
+			run: func(c *Client) error {
+				_, err := c.Scan("fleet").Desc().Asc().Desc().IDs(t.Context())
+				return err
+			},
+			want: []string{"SCAN", "fleet", "DESC", "IDS"},
+		},
+		"whereeval is length prefixed": {
+			run: func(c *Client) error {
+				_, err := c.Scan("fleet").WhereEval("return FIELDS.speed > tonumber(ARGV[1])", 15).IDs(t.Context())
+				return err
+			},
+			want: []string{"SCAN", "fleet", "WHEREEVAL",
+				"return FIELDS.speed > tonumber(ARGV[1])", "1", "15", "IDS"},
+		},
+		"whereevalsha accumulates": {
+			run: func(c *Client) error {
+				_, err := c.Within("fleet").WhereEvalSha("abc", 1).WhereEvalSha("def").
+					Bounds(GlobalBounds()).IDs(t.Context())
+				return err
+			},
+			want: []string{"WITHIN", "fleet", "WHEREEVALSHA", "abc", "1", "1",
+				"WHEREEVALSHA", "def", "0", "IDS", "BOUNDS", "-90", "-180", "90", "180"},
+		},
+		"buffer precedes the output format": {
+			run: func(c *Client) error {
+				_, err := c.Intersects("fleet").Buffer(500).Circle(1, 2, 3).IDs(t.Context())
+				return err
+			},
+			want: []string{"INTERSECTS", "fleet", "BUFFER", "500", "IDS", "CIRCLE", "1", "2", "3"},
+		},
+		"sector area": {
+			run: func(c *Client) error {
+				_, err := c.Within("fleet").Sector(33.5, -115.5, 5000, 0, 90).IDs(t.Context())
+				return err
+			},
+			want: []string{"WITHIN", "fleet", "IDS", "SECTOR", "33.5", "-115.5", "5000", "0", "90"},
+		},
+		"hash area": {
+			run: func(c *Client) error {
+				_, err := c.Intersects("fleet").Hash("9mv").Count(t.Context())
+				return err
+			},
+			want: []string{"INTERSECTS", "fleet", "COUNT", "HASH", "9mv"},
+		},
+		"quadkey area": {
+			run: func(c *Client) error {
+				_, err := c.Within("fleet").QuadKey("0231").Count(t.Context())
+				return err
+			},
+			want: []string{"WITHIN", "fleet", "COUNT", "QUADKEY", "0231"},
+		},
+		// An area replaces whatever came before it rather than appending.
+		"last area wins": {
+			run: func(c *Client) error {
+				_, err := c.Within("fleet").Hash("9mv").QuadKey("0231").Count(t.Context())
+				return err
+			},
+			want: []string{"WITHIN", "fleet", "COUNT", "QUADKEY", "0231"},
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			got := make(chan []string, 1)
+			addr := fakeServer(t, func(r *bufio.Reader, w net.Conn) {
+				got <- readCommand(t, r)
+				_, _ = io.WriteString(w, wire("*2", ":0", "*0"))
+			})
+			c := New(addr)
+			defer c.Close()
+
+			_ = tc.run(c)
+			if cmd := <-got; !reflect.DeepEqual(cmd, tc.want) {
+				t.Errorf("command = %q,\n           want %q", cmd, tc.want)
+			}
+		})
+	}
+}
+
+// DISTANCE belongs to the fence clause for the same reason DETECT does: on a
+// plain query it would add a trailing element to every item and shift the shape
+// the parse helpers expect.
+func TestDistanceOnlyOnFence(t *testing.T) {
+	tests := map[string]struct {
+		run  func(*Client) error
+		want []string
+	}{
+		"ignored without fence": {
+			run: func(c *Client) error {
+				_, err := c.Nearby("fleet").Distance().Point(1, 2).Radius(3).Points(t.Context())
+				return err
+			},
+			want: []string{"NEARBY", "fleet", "POINTS", "POINT", "1", "2", "3"},
+		},
+		"rendered on the fence": {
+			run: func(c *Client) error {
+				st, err := c.Nearby("fleet").Distance().Detect(Enter).Point(1, 2).Radius(3).Fence(t.Context())
+				if st != nil {
+					_ = st.Close()
+				}
+				return err
+			},
+			want: []string{"NEARBY", "fleet", "DISTANCE", "FENCE", "DETECT", "enter",
+				"POINT", "1", "2", "3"},
+		},
+		"rendered on a hook": {
+			run: func(c *Client) error {
+				return c.SetChan("zone").Distance().Nearby("fleet").
+					Point(1, 2).Radius(3).Do(t.Context())
+			},
+			want: []string{"SETCHAN", "zone", "NEARBY", "fleet", "DISTANCE", "FENCE",
+				"POINT", "1", "2", "3"},
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			got := make(chan []string, 1)
+			addr := fakeServer(t, func(r *bufio.Reader, w net.Conn) {
+				got <- readCommand(t, r)
+				_, _ = io.WriteString(w, "+OK\r\n")
+			})
+			c := New(addr)
+			defer c.Close()
+
+			_ = tc.run(c)
+			if cmd := <-got; !reflect.DeepEqual(cmd, tc.want) {
+				t.Errorf("command = %q,\n           want %q", cmd, tc.want)
+			}
+		})
+	}
+}
+
+// TEST is positional throughout — two areas around a verb — so nothing about it
+// can be appended in call order.
+func TestTestCommandAssembly(t *testing.T) {
+	tests := map[string]struct {
+		run   func(*Client) error
+		want  []string
+		reply string
+	}{
+		"within": {
+			run: func(c *Client) error {
+				_, err := c.Test(AreaGet("fleet", "truck1")).
+					Within(AreaBounds(GlobalBounds())).Do(t.Context())
+				return err
+			},
+			want: []string{"TEST", "GET", "fleet", "truck1", "WITHIN",
+				"BOUNDS", "-90", "-180", "90", "180"},
+			reply: ":1\r\n",
+		},
+		"intersects a sector": {
+			run: func(c *Client) error {
+				_, err := c.Test(AreaPoint(33.5, -115.5)).
+					Intersects(AreaSector(33.5, -115.5, 5000, 0, 90)).Do(t.Context())
+				return err
+			},
+			want: []string{"TEST", "POINT", "33.5", "-115.5", "INTERSECTS",
+				"SECTOR", "33.5", "-115.5", "5000", "0", "90"},
+			reply: ":0\r\n",
+		},
+		// CLIP sits between the verb and the second area, and turns the bare
+		// integer reply into [result, geojson].
+		"clip": {
+			run: func(c *Client) error {
+				_, _, err := c.Test(AreaBounds(33, -116, 34, -115)).
+					Intersects(AreaQuadKey("023")).Clip(t.Context())
+				return err
+			},
+			want: []string{"TEST", "BOUNDS", "33", "-116", "34", "-115",
+				"INTERSECTS", "CLIP", "QUADKEY", "023"},
+			reply: wire("*2", ":1", "$7", "{\"a\":1}"),
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			got := make(chan []string, 1)
+			addr := fakeServer(t, func(r *bufio.Reader, w net.Conn) {
+				got <- readCommand(t, r)
+				_, _ = io.WriteString(w, tc.reply)
+			})
+			c := New(addr)
+			defer c.Close()
+
+			if err := tc.run(c); err != nil {
+				t.Fatal(err)
+			}
+			if cmd := <-got; !reflect.DeepEqual(cmd, tc.want) {
+				t.Errorf("command = %q,\n           want %q", cmd, tc.want)
+			}
+		})
+	}
+}
+
+// SEARCH's default output pairs each id with the string value that matched,
+// where a geometry search would carry GeoJSON.
+func TestSearchStrings(t *testing.T) {
+	addr := fakeServer(t, func(r *bufio.Reader, w net.Conn) {
+		_ = readCommand(t, r)
+		_, _ = io.WriteString(w, wire("*2", ":0", "*1",
+			"*3", "$5", "note1", "$11", "hello world", "*2", "$4", "prio", "$1", "3"))
+	})
+	c := New(addr)
+	defer c.Close()
+
+	res, err := c.Search("notes").Match("*hello*").Asc().Strings(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []StringObject{{ID: "note1", Value: "hello world", Fields: Fields{"prio": "3"}}}
+	if !reflect.DeepEqual(res, want) {
+		t.Errorf("strings = %+v, want %+v", res, want)
+	}
+}
+
+// The server commands are argument-shape only: each fixes its tokens at the
+// entry point, and several spell their arguments in ways that are easy to get
+// wrong (READONLY yes/no, "FOLLOW no one", CONFIG's two-word verb).
+func TestServerCommandTokens(t *testing.T) {
+	tests := map[string]struct {
+		run   func(*Client) error
+		want  []string
+		reply string
+	}{
+		"readonly on":  {run: func(c *Client) error { return c.ReadOnly(true).Do(t.Context()) }, want: []string{"READONLY", "yes"}},
+		"readonly off": {run: func(c *Client) error { return c.ReadOnly(false).Do(t.Context()) }, want: []string{"READONLY", "no"}},
+		"follow":       {run: func(c *Client) error { return c.Follow("leader", 9851).Do(t.Context()) }, want: []string{"FOLLOW", "leader", "9851"}},
+		"follow none":  {run: func(c *Client) error { return c.FollowNone().Do(t.Context()) }, want: []string{"FOLLOW", "no", "one"}},
+		"config set":   {run: func(c *Client) error { return c.ConfigSet("keepalive", "300").Do(t.Context()) }, want: []string{"CONFIG", "SET", "keepalive", "300"}},
+		"gc":           {run: func(c *Client) error { return c.GC().Do(t.Context()) }, want: []string{"GC"}},
+		"healthz":      {run: func(c *Client) error { return c.Healthz().Do(t.Context()) }, want: []string{"HEALTHZ"}},
+		"aofshrink":    {run: func(c *Client) error { return c.AOFShrink().Do(t.Context()) }, want: []string{"AOFSHRINK"}},
+		"timeout wraps the command": {
+			run: func(c *Client) error {
+				_, err := c.Timeout(t.Context(), 2.5, "SCAN", "fleet", "COUNT")
+				return err
+			},
+			want: []string{"TIMEOUT", "2.5", "SCAN", "fleet", "COUNT"},
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			got := make(chan []string, 1)
+			addr := fakeServer(t, func(r *bufio.Reader, w net.Conn) {
+				got <- readCommand(t, r)
+				_, _ = io.WriteString(w, "+OK\r\n")
+			})
+			c := New(addr)
+			defer c.Close()
+
+			if err := tc.run(c); err != nil {
+				t.Fatal(err)
+			}
+			if cmd := <-got; !reflect.DeepEqual(cmd, tc.want) {
+				t.Errorf("command = %q, want %q", cmd, tc.want)
+			}
+		})
+	}
+}
+
+// A missing collection comes back as a null element, which has to read as an
+// absent collection rather than failing the whole call.
+func TestStatsDecoding(t *testing.T) {
+	present := wire("*8",
+		"$14", "in_memory_size", "$2", "46",
+		"$11", "num_objects", "$1", "2",
+		"$10", "num_points", "$1", "2",
+		"$11", "num_strings", "$1", "0")
+	addr := fakeServer(t, func(r *bufio.Reader, w net.Conn) {
+		_ = readCommand(t, r)
+		_, _ = io.WriteString(w, "*2\r\n"+present+"$-1\r\n")
+	})
+	c := New(addr)
+	defer c.Close()
+
+	stats, err := c.Stats("fleet", "gone").Do(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []CollectionStats{
+		{Key: "fleet", Exists: true, InMemorySize: 46, NumObjects: 2, NumPoints: 2},
+		{Key: "gone"},
+	}
+	if !reflect.DeepEqual(stats, want) {
+		t.Errorf("stats = %+v, want %+v", stats, want)
+	}
+}
+
+// SET takes the third ordinate as a trailing argument of POINT, on the pipelined
+// form as well as the direct one.
+func TestSetPointZ(t *testing.T) {
+	got := make(chan []string, 2)
+	addr, _ := fakeServerN(t, func(r *bufio.Reader, w net.Conn) {
+		for {
+			v, err := resp.ReadReply(r)
+			if err != nil {
+				return
+			}
+			arr, _ := v.([]any)
+			args := make([]string, len(arr))
+			for i, a := range arr {
+				args[i], _ = a.(string)
+			}
+			got <- args
+			_, _ = io.WriteString(w, "+OK\r\n")
+		}
+	})
+	c := New(addr)
+	defer c.Close()
+
+	if err := c.Set("fleet", "drone").PointZ(51.2, 4.4, 120.5).Do(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"SET", "fleet", "drone", "POINT", "51.2", "4.4", "120.5"}
+	if cmd := <-got; !reflect.DeepEqual(cmd, want) {
+		t.Errorf("command = %q, want %q", cmd, want)
+	}
+
+	p := c.Pipeline()
+	p.Set("fleet", "drone2").PointZ(51.2, 4.4, 0).Queue()
+	if err := p.Flush(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	want = []string{"SET", "fleet", "drone2", "POINT", "51.2", "4.4", "0"}
+	if cmd := <-got; !reflect.DeepEqual(cmd, want) {
+		t.Errorf("pipelined command = %q, want %q", cmd, want)
+	}
+}
