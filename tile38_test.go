@@ -1043,3 +1043,76 @@ func TestPointsDecodeZ(t *testing.T) {
 		}
 	})
 }
+
+// WITHFIELDS wraps the reply in an envelope whose second element is the fields,
+// and which Tile38 emits with a single element when the object has no non-zero
+// fields. Every output format has to unwrap both shapes.
+func TestGetWithFields(t *testing.T) {
+	const point = "*2\r\n$4\r\n51.2\r\n$3\r\n4.4"
+
+	tests := map[string]struct {
+		reply      string
+		wantFields Fields
+	}{
+		"fields present": {
+			reply:      "*2\r\n" + point + "\r\n*2\r\n$5\r\nspeed\r\n$2\r\n42\r\n",
+			wantFields: Fields{"speed": "42"},
+		},
+		// Tile38 drops the fields element entirely for an all-zero object.
+		"no fields element": {
+			reply:      "*1\r\n" + point + "\r\n",
+			wantFields: nil,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			got := make(chan []string, 1)
+			addr := fakeServer(t, func(r *bufio.Reader, w net.Conn) {
+				got <- readCommand(t, r)
+				_, _ = io.WriteString(w, tc.reply)
+			})
+			c := New(addr)
+			defer c.Close()
+
+			g := c.Get("fleet", "truck1").WithFields()
+			lat, lon, err := g.Point(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := []string{"GET", "fleet", "truck1", "WITHFIELDS", "POINT"}
+			if cmd := <-got; !reflect.DeepEqual(cmd, want) {
+				t.Errorf("command = %q, want %q", cmd, want)
+			}
+			if lat != 51.2 || lon != 4.4 {
+				t.Errorf("point = %v,%v, want 51.2,4.4", lat, lon)
+			}
+			if !reflect.DeepEqual(g.Fields(), tc.wantFields) {
+				t.Errorf("fields = %v, want %v", g.Fields(), tc.wantFields)
+			}
+		})
+	}
+
+	// Without WithFields the reply is unwrapped, so no envelope is expected.
+	t.Run("not requested", func(t *testing.T) {
+		got := make(chan []string, 1)
+		addr := fakeServer(t, func(r *bufio.Reader, w net.Conn) {
+			got <- readCommand(t, r)
+			_, _ = io.WriteString(w, point+"\r\n")
+		})
+		c := New(addr)
+		defer c.Close()
+
+		g := c.Get("fleet", "truck1")
+		if _, _, err := g.Point(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		want := []string{"GET", "fleet", "truck1", "POINT"}
+		if cmd := <-got; !reflect.DeepEqual(cmd, want) {
+			t.Errorf("command = %q, want %q", cmd, want)
+		}
+		if g.Fields() != nil {
+			t.Errorf("fields = %v, want nil", g.Fields())
+		}
+	})
+}

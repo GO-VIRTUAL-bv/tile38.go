@@ -140,6 +140,28 @@ func TestCRUD(t *testing.T) {
 		t.Error("get object returned empty geojson")
 	}
 
+	// WITHFIELDS wraps the reply, so geometry and fields arrive in one round trip
+	// rather than an FGet per field.
+	withFields := c.Get(key, "truck1").WithFields()
+	if geojson, err = withFields.Object(ctx); err != nil {
+		t.Fatalf("get withfields: %v", err)
+	}
+	if geojson == "" || withFields.Fields()["speed"] != "42" {
+		t.Errorf("get withfields = %q, fields %v; want speed=42", geojson, withFields.Fields())
+	}
+	// An object with no non-zero fields still decodes: Tile38 omits the fields
+	// element from the envelope entirely.
+	if err := c.Set(key, "bare").Point(1, 1).Do(ctx); err != nil {
+		t.Fatalf("set bare: %v", err)
+	}
+	bare := c.Get(key, "bare").WithFields()
+	if _, _, err := bare.Point(ctx); err != nil {
+		t.Fatalf("get bare withfields: %v", err)
+	}
+	if bare.Fields() != nil {
+		t.Errorf("bare fields = %v, want nil", bare.Fields())
+	}
+
 	speed, err := c.FGet(key, "truck1", "speed").Do(ctx)
 	if err != nil {
 		t.Fatalf("fget: %v", err)
