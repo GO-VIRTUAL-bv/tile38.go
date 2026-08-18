@@ -1,0 +1,848 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
+package tile38
+
+import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"net"
+	"reflect"
+	"strconv"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/GO-VIRTUAL-bv/tile38.go/internal/resp"
+)
+
+// wire joins lines with CRLF, so wire fixtures stay readable.
+func wire(lines ...string) string { return strings.Join(lines, "\r\n") + "\r\n" }
+
+// fakeServer accepts one connection and hands it to handle. It returns the
+// address to dial.
+func fakeServer(t *testing.T, handle func(r *bufio.Reader, w net.Conn)) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		handle(bufio.NewReader(conn), conn)
+	}()
+	return ln.Addr().String()
+}
+
+// fakeServerN accepts every connection until the listener closes, serving each
+// with handle, and reports how many it has accepted.
+func fakeServerN(t *testing.T, handle func(r *bufio.Reader, w net.Conn)) (string, func() int) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	var n atomic.Int64
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			n.Add(1)
+			go func() {
+				defer conn.Close()
+				handle(bufio.NewReader(conn), conn)
+			}()
+		}
+	}()
+	return ln.Addr().String(), func() int { return int(n.Load()) }
+}
+
+// serveCommands answers every command with reply, holding each one for hold so
+// concurrent callers actually overlap.
+func serveCommands(r *bufio.Reader, w net.Conn, reply string, hold time.Duration) {
+	for {
+		if _, err := resp.ReadReply(r); err != nil {
+			return
+		}
+		<-time.After(hold)
+		if _, err := io.WriteString(w, reply); err != nil {
+			return
+		}
+	}
+}
+
+// readCommand decodes one client command into its string arguments.
+func readCommand(t *testing.T, r *bufio.Reader) []string {
+	t.Helper()
+	v, err := resp.ReadReply(r)
+	if err != nil {
+		t.Errorf("read command: %v", err)
+		return nil
+	}
+	arr, ok := v.([]any)
+	if !ok {
+		t.Errorf("command is %T, want array", v)
+		return nil
+	}
+	args := make([]string, len(arr))
+	for i, a := range arr {
+		args[i], _ = a.(string)
+	}
+	return args
+}
+
+// Covers argument encoding, output-format splicing, and array reply decoding.
+func TestNearbyPoints(t *testing.T) {
+	got := make(chan []string, 1)
+	addr := fakeServer(t, func(r *bufio.Reader, w net.Conn) {
+		got <- readCommand(t, r)
+		_, _ = io.WriteString(w, wire(
+			"*2", ":1",
+			"*1", "*2", "$6", "truck1",
+			"*2", "$4", "33.5", "$6", "-115.5",
+		))
+	})
+
+	c := New(addr)
+	defer c.Close()
+
+	res, err := c.Nearby("fleet").Limit(10).Point(33.5, -115.5).Radius(5000).Points(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := []string{"NEARBY", "fleet", "LIMIT", "10", "POINTS", "POINT", "33.5", "-115.5", "5000"}
+	if cmd := <-got; !reflect.DeepEqual(cmd, want) {
+		t.Errorf("command = %q, want %q", cmd, want)
+	}
+	wantRes := []NearbyResult{{ID: "truck1", Lat: 33.5, Lon: -115.5}}
+	if !reflect.DeepEqual(res, wantRes) {
+		t.Errorf("result = %+v, want %+v", res, wantRes)
+	}
+}
+
+// Field values are handed to the RESP encoder untouched, so every type it knows
+// how to render must survive the trip — bools as true/false, raw JSON verbatim.
+func TestFieldValueEncoding(t *testing.T) {
+	got := make(chan []string, 1)
+	addr := fakeServer(t, func(r *bufio.Reader, w net.Conn) {
+		got <- readCommand(t, r)
+		_, _ = io.WriteString(w, "+OK\r\n")
+	})
+	c := New(addr)
+	defer c.Close()
+
+	err := c.Set("fleet", "truck1").Fields(
+		Field("active", true),
+		Field("idle", false),
+		Field("speed", 12.5),
+		Field("meta", json.RawMessage(`{"a":1}`)),
+	).Point(33.5, -115.5).Do(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := []string{"SET", "fleet", "truck1",
+		"FIELD", "active", "true", "FIELD", "idle", "false",
+		"FIELD", "speed", "12.5", "FIELD", "meta", `{"a":1}`,
+		"POINT", "33.5", "-115.5"}
+	if cmd := <-got; !reflect.DeepEqual(cmd, want) {
+		t.Errorf("command = %q,\n           want %q", cmd, want)
+	}
+}
+
+// Options chained after the geometry used to corrupt the command, because the
+// output format was spliced in at a token offset. Every chain order must now
+// produce the same bytes.
+func TestChainOrderIsIrrelevant(t *testing.T) {
+	// Options render in a canonical order regardless of chain order: repeatable
+	// options in the order given, then LIMIT, then the format, then the geometry.
+	want := []string{"NEARBY", "fleet", "WHERE", "speed > 5", "LIMIT", "10", "POINTS", "POINT", "33.5", "-115.5", "5000"}
+
+	orders := map[string]func(*Client) *NearbyCmd{
+		"options first": func(c *Client) *NearbyCmd {
+			return c.Nearby("fleet").Limit(10).Where("speed > 5").Point(33.5, -115.5).Radius(5000)
+		},
+		"options last": func(c *Client) *NearbyCmd {
+			return c.Nearby("fleet").Point(33.5, -115.5).Radius(5000).Limit(10).Where("speed > 5")
+		},
+		"interleaved": func(c *Client) *NearbyCmd {
+			return c.Nearby("fleet").Point(33.5, -115.5).Limit(10).Radius(5000).Where("speed > 5")
+		},
+		"radius before at": func(c *Client) *NearbyCmd {
+			return c.Nearby("fleet").Radius(5000).Limit(10).Point(33.5, -115.5).Where("speed > 5")
+		},
+	}
+
+	for name, build := range orders {
+		t.Run(name, func(t *testing.T) {
+			got := make(chan []string, 1)
+			addr := fakeServer(t, func(r *bufio.Reader, w net.Conn) {
+				got <- readCommand(t, r)
+				_, _ = io.WriteString(w, wire("*2", ":0", "*0"))
+			})
+			c := New(addr)
+			defer c.Close()
+
+			if _, err := build(c).Points(t.Context()); err != nil {
+				t.Fatal(err)
+			}
+			if cmd := <-got; !reflect.DeepEqual(cmd, want) {
+				t.Errorf("command = %q,\n           want %q", cmd, want)
+			}
+		})
+	}
+}
+
+// Tile38 rejects a repeated LIMIT/DETECT/COMMANDS, so calling those twice must
+// overwrite rather than emit a duplicate. WHERE and MATCH legitimately
+// accumulate and must keep doing so.
+func TestRepeatedOptions(t *testing.T) {
+	tests := map[string]struct {
+		build func(*Client) error
+		want  []string
+	}{
+		"limit twice keeps the last": {
+			build: func(c *Client) error {
+				_, err := c.Nearby("fleet").Limit(1).Limit(5).
+					Point(33.5, -115.5).Radius(500).IDs(t.Context())
+				return err
+			},
+			want: []string{"NEARBY", "fleet", "LIMIT", "5", "IDS", "POINT", "33.5", "-115.5", "500"},
+		},
+		"detect and commands twice keep the last": {
+			build: func(c *Client) error {
+				return c.SetChan("z").Within("fleet").
+					Detect(Enter).Detect(Inside, Exit).
+					Commands(CommandDel).Commands(CommandSet).
+					Bounds(GlobalBounds()).Do(t.Context())
+			},
+			want: []string{"SETCHAN", "z", "WITHIN", "fleet", "FENCE",
+				"DETECT", "inside,exit", "COMMANDS", "set",
+				"BOUNDS", "-90", "-180", "90", "180"},
+		},
+		"scan renders its limit": {
+			build: func(c *Client) error {
+				_, err := c.Scan("fleet").Limit(50).IDs(t.Context())
+				return err
+			},
+			want: []string{"SCAN", "fleet", "LIMIT", "50", "IDS"},
+		},
+		"single-use flags render once": {
+			build: func(c *Client) error {
+				_, err := c.Within("fleet").NoFields().NoFields().Clip().
+					Sparse(2).Sparse(4).Bounds(GlobalBounds()).Objects(t.Context())
+				return err
+			},
+			want: []string{"WITHIN", "fleet", "SPARSE", "4", "NOFIELDS", "CLIP",
+				"OBJECTS", "BOUNDS", "-90", "-180", "90", "180"},
+		},
+		"wherein is length-prefixed and accumulates": {
+			build: func(c *Client) error {
+				_, err := c.Scan("fleet").
+					WhereIn("kind", "truck", "van").
+					WhereIn("zone", 1, 2, 3).IDs(t.Context())
+				return err
+			},
+			want: []string{"SCAN", "fleet",
+				"WHEREIN", "kind", "2", "truck", "van",
+				"WHEREIN", "zone", "3", "1", "2", "3", "IDS"},
+		},
+		"where and match accumulate": {
+			build: func(c *Client) error {
+				_, err := c.Scan("fleet").
+					Where("speed > 5").Where("fuel < 50").
+					Match("truck:*").Match("van:*").IDs(t.Context())
+				return err
+			},
+			want: []string{"SCAN", "fleet", "WHERE", "speed > 5", "WHERE", "fuel < 50",
+				"MATCH", "truck:*", "MATCH", "van:*", "IDS"},
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			got := make(chan []string, 1)
+			addr := fakeServer(t, func(r *bufio.Reader, w net.Conn) {
+				got <- readCommand(t, r)
+				_, _ = io.WriteString(w, wire("*2", ":0", "*0"))
+			})
+			c := New(addr)
+			defer c.Close()
+
+			if err := tc.build(c); err != nil {
+				t.Fatal(err)
+			}
+			if cmd := <-got; !reflect.DeepEqual(cmd, tc.want) {
+				t.Errorf("command = %q,\n           want %q", cmd, tc.want)
+			}
+		})
+	}
+}
+
+// Detect and Commands describe a fence. On a plain query they must be dropped
+// rather than turning it into a live one the caller is not reading as a stream.
+func TestDetectIgnoredWithoutFence(t *testing.T) {
+	got := make(chan []string, 1)
+	addr := fakeServer(t, func(r *bufio.Reader, w net.Conn) {
+		got <- readCommand(t, r)
+		_, _ = io.WriteString(w, ":0\r\n") // COUNT replies with a bare integer
+	})
+	c := New(addr)
+	defer c.Close()
+
+	if _, err := c.Within("fleet").Detect(Enter).Commands(CommandSet).
+		Bounds(GlobalBounds()).Count(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+
+	want := []string{"WITHIN", "fleet", "COUNT", "BOUNDS", "-90", "-180", "90", "180"}
+	if cmd := <-got; !reflect.DeepEqual(cmd, want) {
+		t.Errorf("command = %q, want %q", cmd, want)
+	}
+}
+
+// Hook and channel builders assemble the same way as search builders, and
+// GlobalBounds() must bind straight onto Bounds' four parameters.
+func TestHookAssembly(t *testing.T) {
+	tests := map[string]struct {
+		build func(*Client) error
+		want  []string
+	}{
+		"global bounds in any order": {
+			build: func(c *Client) error {
+				return c.SetChan("zone").Bounds(GlobalBounds()).Within("fleet").
+					Commands(CommandSet).Detect(Inside).Do(t.Context())
+			},
+			want: []string{"SETCHAN", "zone", "WITHIN", "fleet", "FENCE",
+				"DETECT", "inside", "COMMANDS", "set", "BOUNDS", "-90", "-180", "90", "180"},
+		},
+		"detect then area": {
+			build: func(c *Client) error {
+				return c.SetHook("h").Endpoint("http://x", "y").Within("fleet").
+					Detect(Enter, Exit).Get("zones", "z1").Do(t.Context())
+			},
+			want: []string{"SETHOOK", "h", "http://x/y", "WITHIN", "fleet", "FENCE",
+				"DETECT", "enter,exit", "GET", "zones", "z1"},
+		},
+		// SETHOOK takes the endpoint positionally, right after the name, so it
+		// cannot be appended in call order the way an option can.
+		"endpoint after trigger": {
+			build: func(c *Client) error {
+				return c.SetHook("h").Within("fleet").Detect(Enter, Exit).
+					Endpoint("http://x", "y").Get("zones", "z1").Do(t.Context())
+			},
+			want: []string{"SETHOOK", "h", "http://x/y", "WITHIN", "fleet", "FENCE",
+				"DETECT", "enter,exit", "GET", "zones", "z1"},
+		},
+		// Tile38 splits one endpoint token on commas, so several endpoints
+		// register on the same hook.
+		"multiple endpoints": {
+			build: func(c *Client) error {
+				return c.SetHook("h").
+					EndpointURL("kafka://k:9092/events", "http://x/y?token=1").
+					Within("fleet").Circle(1, 2, 3).Do(t.Context())
+			},
+			want: []string{"SETHOOK", "h", "kafka://k:9092/events,http://x/y?token=1",
+				"WITHIN", "fleet", "FENCE", "CIRCLE", "1", "2", "3"},
+		},
+		// META and EX sit between the name/endpoint and the trigger.
+		"meta and ex before the trigger": {
+			build: func(c *Client) error {
+				return c.SetChan("zone").Intersects("fleet").
+					Meta("team", "ops").Meta("tier", "1").EX(3600).
+					Circle(1, 2, 3).Do(t.Context())
+			},
+			want: []string{"SETCHAN", "zone", "META", "team", "ops", "META", "tier", "1",
+				"EX", "3600", "INTERSECTS", "fleet", "FENCE", "CIRCLE", "1", "2", "3"},
+		},
+		"bare fence needs no detect": {
+			build: func(c *Client) error {
+				return c.SetChan("zone").Within("fleet").Circle(33.5, -115.5, 5000).Do(t.Context())
+			},
+			want: []string{"SETCHAN", "zone", "WITHIN", "fleet", "FENCE",
+				"CIRCLE", "33.5", "-115.5", "5000"},
+		},
+		// NODWELL is opt-in: Roam used to force it, so a hook could never
+		// report objects that stayed in range.
+		"roam dwells by default": {
+			build: func(c *Client) error {
+				return c.SetChan("zone").Nearby("fleet").Roam("targets", 500).Do(t.Context())
+			},
+			want: []string{"SETCHAN", "zone", "NEARBY", "fleet", "FENCE",
+				"ROAM", "targets", "*", "500"},
+		},
+		"roam with nodwell": {
+			build: func(c *Client) error {
+				return c.SetHook("h").Endpoint("http://x", "y").Nearby("fleet").
+					NoDwell().Roam("targets", 500).Do(t.Context())
+			},
+			want: []string{"SETHOOK", "h", "http://x/y", "NEARBY", "fleet", "FENCE",
+				"NODWELL", "ROAM", "targets", "*", "500"},
+		},
+		// MATCH is an option on the trigger collection: it renders after WITHIN
+		// and before the FENCE clause, whichever order it is chained in.
+		"match filters the trigger before the fence": {
+			build: func(c *Client) error {
+				return c.SetHook("geofence:acme:g1").Endpoint("nats://n:4222", "app.sys.geofence.hook.detect").
+					Meta("org", "acme").Meta("geofence_id", "g1").
+					Within("devices").Match("acme:*").Detect(Enter, Exit).
+					Object(`{"type":"Point"}`).Do(t.Context())
+			},
+			want: []string{"SETHOOK", "geofence:acme:g1", "nats://n:4222/app.sys.geofence.hook.detect",
+				"META", "org", "acme", "META", "geofence_id", "g1",
+				"WITHIN", "devices", "MATCH", "acme:*", "FENCE", "DETECT", "enter,exit",
+				"OBJECT", `{"type":"Point"}`},
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			got := make(chan []string, 1)
+			addr := fakeServer(t, func(r *bufio.Reader, w net.Conn) {
+				got <- readCommand(t, r)
+				_, _ = io.WriteString(w, "+OK\r\n")
+			})
+			c := New(addr)
+			defer c.Close()
+
+			if err := tc.build(c); err != nil {
+				t.Fatal(err)
+			}
+			if cmd := <-got; !reflect.DeepEqual(cmd, tc.want) {
+				t.Errorf("command = %q,\n           want %q", cmd, tc.want)
+			}
+		})
+	}
+}
+
+// Covers the FENCE clause splice, live-message framing, and Close semantics.
+func TestFenceStream(t *testing.T) {
+	got := make(chan []string, 1)
+	addr := fakeServer(t, func(r *bufio.Reader, w net.Conn) {
+		got <- readCommand(t, r)
+		_, _ = io.WriteString(w, "+OK\r\n")
+		for _, ev := range []string{
+			`{"command":"set","detect":"enter","id":"truck1","hook":"h"}`,
+			`{"command":"set","detect":"exit","id":"truck1","hook":"h"}`,
+		} {
+			_, _ = io.WriteString(w, wire("$"+strconv.Itoa(len(ev)), ev))
+		}
+		<-time.After(time.Second) // hold the connection open until Close
+	})
+
+	c := New(addr)
+	defer c.Close()
+
+	st, err := c.Nearby("fleet").Point(33.5, -115.5).Radius(5000).Detect(Enter, Exit).Fence(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want := []string{"NEARBY", "fleet", "FENCE", "DETECT", "enter,exit", "POINT", "33.5", "-115.5", "5000"}
+	if cmd := <-got; !reflect.DeepEqual(cmd, want) {
+		t.Errorf("command = %q, want %q", cmd, want)
+	}
+
+	for _, wantDetect := range []string{"enter", "exit"} {
+		ev, err := st.Next()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ev.Detect != wantDetect || ev.ID != "truck1" {
+			t.Errorf("event = %+v, want detect %q", ev, wantDetect)
+		}
+	}
+
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Next(); !errors.Is(err, io.EOF) {
+		t.Errorf("Next after Close = %v, want io.EOF", err)
+	}
+}
+
+// Tile38 caps every search at 100 results when no LIMIT is given and signals it
+// by returning a non-zero cursor. Dropping that cursor is how a query silently
+// starts returning partial results as a collection grows.
+func TestSearchTruncation(t *testing.T) {
+	// Two ids and a cursor of 2: the scan stopped early.
+	truncated := wire("*2", ":2", "*2", "$2", "t1", "$2", "t2")
+	complete := wire("*2", ":0", "*2", "$2", "t1", "$2", "t2")
+
+	tests := map[string]struct {
+		reply      string
+		build      func(*Client) *ScanCmd
+		wantErr    bool
+		wantCursor uint64
+		wantCmd    []string
+	}{
+		"non-zero cursor without a limit reports truncation": {
+			reply:      truncated,
+			build:      func(c *Client) *ScanCmd { return c.Scan("fleet") },
+			wantErr:    true,
+			wantCursor: 2,
+			wantCmd:    []string{"SCAN", "fleet", "IDS"},
+		},
+		"zero cursor is a complete result": {
+			reply:   complete,
+			build:   func(c *Client) *ScanCmd { return c.Scan("fleet") },
+			wantCmd: []string{"SCAN", "fleet", "IDS"},
+		},
+		"an explicit limit means the cap was asked for": {
+			reply:      truncated,
+			build:      func(c *Client) *ScanCmd { return c.Scan("fleet").Limit(2) },
+			wantCursor: 2,
+			wantCmd:    []string{"SCAN", "fleet", "LIMIT", "2", "IDS"},
+		},
+		"paging with a cursor is deliberate": {
+			reply:      truncated,
+			build:      func(c *Client) *ScanCmd { return c.Scan("fleet").Cursor(100) },
+			wantCursor: 2,
+			wantCmd:    []string{"SCAN", "fleet", "CURSOR", "100", "IDS"},
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			got := make(chan []string, 1)
+			addr := fakeServer(t, func(r *bufio.Reader, w net.Conn) {
+				got <- readCommand(t, r)
+				_, _ = io.WriteString(w, tc.reply)
+			})
+			c := New(addr)
+			defer c.Close()
+
+			cmd := tc.build(c)
+			ids, err := cmd.IDs(t.Context())
+			if tc.wantErr != errors.Is(err, ErrTruncated) {
+				t.Errorf("err = %v, want ErrTruncated: %v", err, tc.wantErr)
+			}
+			// The partial results are valid and must come back either way.
+			if want := []string{"t1", "t2"}; !reflect.DeepEqual(ids, want) {
+				t.Errorf("ids = %q, want %q", ids, want)
+			}
+			if cmd.NextCursor() != tc.wantCursor {
+				t.Errorf("NextCursor = %d, want %d", cmd.NextCursor(), tc.wantCursor)
+			}
+			if c := <-got; !reflect.DeepEqual(c, tc.wantCmd) {
+				t.Errorf("command = %q, want %q", c, tc.wantCmd)
+			}
+		})
+	}
+}
+
+// Tile38 rejects "CURSOR ... FENCE", so a cursor left on the builder must not
+// reach the fence command.
+func TestFenceDropsCursor(t *testing.T) {
+	got := make(chan []string, 1)
+	addr := fakeServer(t, func(r *bufio.Reader, w net.Conn) {
+		got <- readCommand(t, r)
+		_, _ = io.WriteString(w, "+OK\r\n")
+		<-time.After(time.Second)
+	})
+	c := New(addr)
+	defer c.Close()
+
+	st, err := c.Within("fleet").Cursor(50).Bounds(GlobalBounds()).Fence(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	want := []string{"WITHIN", "fleet", "FENCE", "BOUNDS", "-90", "-180", "90", "180"}
+	if cmd := <-got; !reflect.DeepEqual(cmd, want) {
+		t.Errorf("command = %q,\n           want %q", cmd, want)
+	}
+}
+
+// COUNT replies with a bare integer. An array reply leads with the cursor, so
+// accepting that shape would report the cursor as the count.
+func TestCountRejectsArrayReply(t *testing.T) {
+	for name, reply := range map[string]string{
+		"bare integer": ":7\r\n",
+		"cursor array": wire("*2", ":3", "*0"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			addr := fakeServer(t, func(r *bufio.Reader, w net.Conn) {
+				readCommand(t, r)
+				_, _ = io.WriteString(w, reply)
+			})
+			c := New(addr)
+			defer c.Close()
+
+			n, err := c.Within("fleet").Bounds(GlobalBounds()).Count(t.Context())
+			if name == "bare integer" {
+				if err != nil || n != 7 {
+					t.Errorf("Count = %d, %v; want 7, nil", n, err)
+				}
+				return
+			}
+			if err == nil {
+				t.Errorf("Count = %d, nil; want an error for a cursor-shaped reply", n)
+			}
+		})
+	}
+}
+
+// ROAM is only legal on a live NEARBY fence, and it carries its own radius —
+// a Radius chained alongside it must not be appended a second time.
+func TestRoamFence(t *testing.T) {
+	got := make(chan []string, 1)
+	addr := fakeServer(t, func(r *bufio.Reader, w net.Conn) {
+		got <- readCommand(t, r)
+		_, _ = io.WriteString(w, "+OK\r\n")
+		<-time.After(time.Second)
+	})
+	c := New(addr)
+	defer c.Close()
+
+	st, err := c.Nearby("fleet").Radius(500).NoDwell().
+		Roam("targets", 250).Fence(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	want := []string{"NEARBY", "fleet", "FENCE", "NODWELL", "ROAM", "targets", "*", "250"}
+	if cmd := <-got; !reflect.DeepEqual(cmd, want) {
+		t.Errorf("command = %q,\n           want %q", cmd, want)
+	}
+}
+
+// MaxIdle bounds only idle connections, so without MaxActive a burst of
+// concurrent commands opens a socket per goroutine.
+func TestMaxActiveBoundsConnections(t *testing.T) {
+	tests := map[string]struct {
+		opts   []Option
+		verify func(t *testing.T, accepted int)
+	}{
+		"capped at one": {
+			opts: []Option{WithMaxActive(1)},
+			verify: func(t *testing.T, accepted int) {
+				if accepted != 1 {
+					t.Errorf("accepted %d connections, want 1", accepted)
+				}
+			},
+		},
+		"uncapped by default": {
+			verify: func(t *testing.T, accepted int) {
+				if accepted < 2 {
+					t.Errorf("accepted %d connections, want the burst to fan out", accepted)
+				}
+			},
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			addr, accepted := fakeServerN(t, func(r *bufio.Reader, w net.Conn) {
+				serveCommands(r, w, "+PONG\r\n", 20*time.Millisecond)
+			})
+			c := New(addr, tc.opts...)
+			defer c.Close()
+
+			var wg sync.WaitGroup
+			for range 8 {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					if err := c.Ping(t.Context()); err != nil {
+						t.Errorf("Ping: %v", err)
+					}
+				}()
+			}
+			wg.Wait()
+			tc.verify(t, accepted())
+		})
+	}
+}
+
+// A context without a deadline must not leave a command waiting forever on a
+// server that never answers.
+func TestCommandTimeoutWithoutContextDeadline(t *testing.T) {
+	addr := fakeServer(t, func(_ *bufio.Reader, _ net.Conn) {
+		<-time.After(5 * time.Second) // never replies
+	})
+	c := New(addr, WithTimeout(50*time.Millisecond))
+	defer c.Close()
+
+	done := make(chan error, 1)
+	go func() { done <- c.Ping(context.Background()) }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Error("Ping = nil, want a timeout error")
+		}
+	case <-time.After(2 * time.Second):
+		t.Error("Ping did not return; the timeout was not applied")
+	}
+}
+
+// Covers batching every queued command into one write and surfacing the first
+// command error while keeping the connection usable.
+func TestPipelineFlush(t *testing.T) {
+	got := make(chan []string, 2)
+	addr := fakeServer(t, func(r *bufio.Reader, w net.Conn) {
+		got <- readCommand(t, r)
+		got <- readCommand(t, r)
+		_, _ = io.WriteString(w, "+OK\r\n-ERR invalid argument\r\n")
+	})
+
+	c := New(addr)
+	defer c.Close()
+
+	p := c.Pipeline()
+	p.Set("fleet", "truck1").Point(33.5, -115.5).Queue()
+	p.Set("fleet", "truck2").EX(60).Field("speed", 12).Point(33.6, -115.6).Queue()
+	if p.Len() != 2 {
+		t.Fatalf("Len = %d, want 2", p.Len())
+	}
+
+	err := p.Flush(t.Context())
+	var se ServerError
+	if !errors.As(err, &se) {
+		t.Fatalf("Flush = %v, want a ServerError", err)
+	}
+
+	want := [][]string{
+		{"SET", "fleet", "truck1", "POINT", "33.5", "-115.5"},
+		{"SET", "fleet", "truck2", "EX", "60", "FIELD", "speed", "12", "POINT", "33.6", "-115.6"},
+	}
+	for _, w := range want {
+		if cmd := <-got; !reflect.DeepEqual(cmd, w) {
+			t.Errorf("command = %q, want %q", cmd, w)
+		}
+	}
+	if p.Len() != 0 {
+		t.Errorf("Len after Flush = %d, want 0", p.Len())
+	}
+}
+
+// Covers the pub/sub message shape: acks are skipped, payloads decoded.
+func TestSubscribeSkipsAcks(t *testing.T) {
+	addr := fakeServer(t, func(r *bufio.Reader, w net.Conn) {
+		readCommand(t, r)
+		ev := `{"command":"set","detect":"inside","id":"truck1"}`
+		_, _ = io.WriteString(w, wire(
+			"*3", "$9", "subscribe", "$5", "zones", ":1",
+			"*3", "$9", "subscribe", "$5", "other", ":2",
+			"*3", "$7", "message", "$5", "zones", "$"+strconv.Itoa(len(ev)), ev,
+		))
+		<-time.After(time.Second)
+	})
+
+	c := New(addr)
+	defer c.Close()
+
+	st, err := c.Subscribe(t.Context(), "zones", "other")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	ev, err := st.Next()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ev.Detect != "inside" || ev.ID != "truck1" {
+		t.Errorf("event = %+v", ev)
+	}
+}
+
+// Cancelling the context must unblock a stream stuck waiting for events.
+func TestStreamContextCancel(t *testing.T) {
+	addr := fakeServer(t, func(r *bufio.Reader, w net.Conn) {
+		readCommand(t, r)
+		_, _ = io.WriteString(w, "+OK\r\n")
+		<-time.After(5 * time.Second)
+	})
+
+	c := New(addr)
+	defer c.Close()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	st, err := c.Within("fleet").Bounds(-90, -180, 90, 180).Fence(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	go func() {
+		<-time.After(50 * time.Millisecond)
+		cancel()
+	}()
+	if _, err := st.Next(); !errors.Is(err, context.Canceled) {
+		t.Errorf("Next = %v, want context.Canceled", err)
+	}
+}
+
+// Search results carry the object's FIELDS as a flat name/value array that Tile38
+// omits entirely when every field is zero, so both item shapes have to decode in
+// the same reply. The fixtures below are the bytes a 1.38 server actually sends.
+func TestObjectsDecodeFields(t *testing.T) {
+	const point = `{"type":"Point","coordinates":[4.4,51.2]}`
+
+	tests := map[string]struct {
+		item string
+		want map[string]string
+	}{
+		"no fields element": {
+			item: wire("*2", "$1", "a", "$41", point),
+			want: nil,
+		},
+		"numeric field keeps Tile38's own text": {
+			item: wire("*3", "$1", "b", "$41", point, "*2", "$5", "speed", "$4", "12.5"),
+			want: map[string]string{"speed": "12.5"},
+		},
+		"json field survives verbatim": {
+			item: wire("*3", "$1", "c", "$41", point,
+				"*4", "$8", "hardware", "$29", `{"battery":{"percentage":80}}`, "$5", "speed", "$1", "3"),
+			want: map[string]string{"hardware": `{"battery":{"percentage":80}}`, "speed": "3"},
+		},
+		// Rather than fail the search and lose the geometry with it.
+		"unpaired fields array is dropped": {
+			item: wire("*3", "$1", "d", "$41", point, "*1", "$5", "speed"),
+			want: nil,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			addr := fakeServer(t, func(r *bufio.Reader, w net.Conn) {
+				_ = readCommand(t, r)
+				_, _ = io.WriteString(w, wire("*2", ":0", "*1")+tc.item)
+			})
+			c := New(addr)
+			defer c.Close()
+
+			objs, err := c.Scan("fleet").Objects(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(objs) != 1 {
+				t.Fatalf("objects = %+v, want 1", objs)
+			}
+			if objs[0].GeoJSON != point {
+				t.Errorf("geojson = %q, want %q", objs[0].GeoJSON, point)
+			}
+			if !reflect.DeepEqual(objs[0].Fields, tc.want) {
+				t.Errorf("fields = %v, want %v", objs[0].Fields, tc.want)
+			}
+		})
+	}
+}
