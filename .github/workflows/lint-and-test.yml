@@ -66,6 +66,12 @@ jobs:
       - name: Run unit tests with coverage
         run: go test -race -coverprofile=coverage.out -covermode=atomic -v ./...
 
+      # Codecov is not enabled for now: CODECOV_TOKEN is not set on this
+      # repository, so this step uploads nothing and `fail_ci_if_error: false`
+      # keeps that from failing the build — which is exactly why it went
+      # unnoticed. The coverage profile above is still produced and is what
+      # `make test` reports locally. Add the secret to turn reporting on; until
+      # then a Codecov badge would render "unknown", so the README omits one.
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v7
         with:
