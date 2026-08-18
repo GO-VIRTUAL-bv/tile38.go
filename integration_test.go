@@ -429,8 +429,7 @@ func TestPointZ(t *testing.T) {
 	c, key := newClient(t)
 	ctx := t.Context()
 
-	if err := c.Set(key, "flying").Object(
-		`{"type":"Point","coordinates":[-115.5,33.5,120.5]}`).Do(ctx); err != nil {
+	if err := c.Set(key, "flying").PointZ(33.5, -115.5, 120.5).Do(ctx); err != nil {
 		t.Fatalf("set 3d: %v", err)
 	}
 	if err := c.Set(key, "ground").Point(33.6, -115.6).Do(ctx); err != nil {
@@ -463,13 +462,23 @@ func TestPointZ(t *testing.T) {
 		t.Errorf("scan points 2d z = %v, want 0", byID["ground"].Z)
 	}
 
+	// A pipelined SET takes the same third ordinate.
+	p := c.Pipeline()
+	p.Set(key, "queued").PointZ(33.4, -115.4, 60).Queue()
+	if err := p.Flush(ctx); err != nil {
+		t.Fatalf("pipeline set 3d: %v", err)
+	}
+	if _, _, z, err = c.Get(key, "queued").PointZ(ctx); err != nil || z != 60 {
+		t.Errorf("pipelined z = %v, %v; want 60", z, err)
+	}
+
 	// The z lives inside the coordinate array, so the trailing distance must not
 	// be read as one or vice versa.
 	withDist, err := c.Nearby(key).Point(33.5, -115.5).Radius(100000).PointsWithDistance(ctx)
 	if err != nil {
 		t.Fatalf("points with distance: %v", err)
 	}
-	if len(withDist) != 2 || withDist[0].ID != "flying" {
+	if len(withDist) != 3 || withDist[0].ID != "flying" {
 		t.Fatalf("points with distance = %+v", withDist)
 	}
 	if withDist[0].Z != 120.5 || withDist[0].Distance != 0 {
@@ -1165,7 +1174,6 @@ func TestHooks(t *testing.T) {
 	}
 }
 
-// A rejected command must not poison the pooled connection.
 // The server and admin commands. Each is checked against a real server because
 // several are not in Tile38's own commands.json and none can be inferred from a
 // reply shape alone.
@@ -1248,6 +1256,7 @@ func TestServerCommands(t *testing.T) {
 	}
 }
 
+// A rejected command must not poison the pooled connection.
 func TestServerErrorKeepsConnectionUsable(t *testing.T) {
 	c, key := newClient(t)
 	ctx := t.Context()

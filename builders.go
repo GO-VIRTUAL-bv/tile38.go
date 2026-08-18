@@ -292,6 +292,14 @@ func (cmd *SetCmd) Fields(fields ...field) *SetCmd {
 	return cmd
 }
 
+// PointZ stores the object as a POINT carrying a third ordinate, which Tile38
+// keeps and hands back through PointZ and NearbyResult.Z. A z of zero is stored
+// as a plain two-dimensional point.
+func (cmd *SetCmd) PointZ(lat, lon, z float64) *SetCmd {
+	cmd.args = append(cmd.args, "POINT", lat, lon, z)
+	return cmd
+}
+
 // Point stores the object as a POINT at the given coordinates.
 func (cmd *SetCmd) Point(lat, lon float64) *SetCmd {
 	cmd.args = append(cmd.args, "POINT", lat, lon)
@@ -1643,6 +1651,12 @@ func (cmd *PipelineSetCmd) Fields(fields ...field) *PipelineSetCmd {
 	for _, f := range fields {
 		cmd.args = append(cmd.args, "FIELD", f.name, f.value)
 	}
+	return cmd
+}
+
+// PointZ sets the POINT coordinates with a third ordinate. See SetCmd.PointZ.
+func (cmd *PipelineSetCmd) PointZ(lat, lon, z float64) *PipelineSetCmd {
+	cmd.args = append(cmd.args, "POINT", lat, lon, z)
 	return cmd
 }
 
