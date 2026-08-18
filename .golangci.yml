@@ -1,0 +1,75 @@
+version: "2"
+linters:
+  enable:
+    - bodyclose
+    - dupl
+    - gocognit
+    - goconst
+    - gocritic
+    - gocyclo
+    - misspell
+    - nakedret
+    - revive
+    - unparam
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - sloglint
+
+  settings:
+    errcheck:
+      check-type-assertions: true
+    goconst:
+      min-len: 2
+      min-occurrences: 3
+      # Tile38 protocol keywords are repeated across builders by design; naming
+      # them as constants would obscure the command each builder emits.
+      ignore-string-values:
+        - "^[A-Z0-9_]+$"
+    gocyclo:
+      min-complexity: 15
+    revive:
+      severity: warning
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      # Search builders (NEARBY/WITHIN/INTERSECTS) and the hook/channel builders
+      # are deliberately parallel: each command gets its own concrete type so the
+      # fluent chain stays type-safe. Collapsing the repetition behind generics
+      # or embedding would cost more than it saves.
+      - linters: [dupl]
+        path: (builders|intersects|channel)\.go
+      # Tests read as a linear sequence of arrange/assert steps. Complexity and
+      # duplication metrics fight that structure without making them safer.
+      - linters: [dupl, goconst, gocyclo, gocognit]
+        path: _test\.go
+      # resp.go is a pair of flat switches — over RESP type bytes when decoding,
+      # over Go argument types when encoding. Both score badly on complexity
+      # metrics and both get harder to check against the wire format if split.
+      - linters: [gocyclo, gocognit]
+        path: resp\.go
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/GO-VIRTUAL-bv/tile38.go
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
