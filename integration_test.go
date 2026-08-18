@@ -1166,6 +1166,88 @@ func TestHooks(t *testing.T) {
 }
 
 // A rejected command must not poison the pooled connection.
+// The server and admin commands. Each is checked against a real server because
+// several are not in Tile38's own commands.json and none can be inferred from a
+// reply shape alone.
+func TestServerCommands(t *testing.T) {
+	c, key := newClient(t)
+	ctx := t.Context()
+
+	if err := c.Set(key, "a").Point(33.5, -115.5).Do(ctx); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	if err := c.Set(key, "s").String("hello").Do(ctx); err != nil {
+		t.Fatalf("set string: %v", err)
+	}
+
+	stats, err := c.Stats(key, key+"-missing").Do(ctx)
+	if err != nil {
+		t.Fatalf("stats: %v", err)
+	}
+	if len(stats) != 2 {
+		t.Fatalf("stats = %+v, want 2 entries", stats)
+	}
+	if !stats[0].Exists || stats[0].NumObjects != 2 || stats[0].NumPoints != 1 || stats[0].NumStrings != 1 {
+		t.Errorf("stats[0] = %+v, want 2 objects, 1 point, 1 string", stats[0])
+	}
+	if stats[0].Key != key || stats[0].InMemorySize == 0 {
+		t.Errorf("stats[0] = %+v, want key %q and a non-zero size", stats[0], key)
+	}
+	// A missing collection is a null element, not an error.
+	if stats[1].Exists || stats[1].NumObjects != 0 {
+		t.Errorf("stats[1] = %+v, want a zero entry", stats[1])
+	}
+
+	// CONFIG SET applies immediately; CONFIG GET reads it back.
+	if err := c.ConfigSet("keepalive", "310").Do(ctx); err != nil {
+		t.Fatalf("config set: %v", err)
+	}
+	if v, err := c.ConfigGet("keepalive").Do(ctx); err != nil || v != "310" {
+		t.Errorf("config get = %q, %v; want 310", v, err)
+	}
+	if err := c.ConfigRewrite().Do(ctx); err != nil {
+		t.Fatalf("config rewrite: %v", err)
+	}
+
+	if err := c.Healthz().Do(ctx); err != nil {
+		t.Errorf("healthz: %v", err)
+	}
+	if err := c.GC().Do(ctx); err != nil {
+		t.Errorf("gc: %v", err)
+	}
+	if err := c.AOFShrink().Do(ctx); err != nil {
+		t.Errorf("aofshrink: %v", err)
+	}
+	// FollowNone promotes a leader that is already a leader, so it is the safe
+	// half of FOLLOW to exercise against the shared container.
+	if err := c.FollowNone().Do(ctx); err != nil {
+		t.Errorf("follow none: %v", err)
+	}
+
+	// READONLY has to be turned back off, or every later test in the package
+	// fails on a write.
+	if err := c.ReadOnly(true).Do(ctx); err != nil {
+		t.Fatalf("readonly on: %v", err)
+	}
+	writeErr := c.Set(key, "denied").Point(1, 1).Do(ctx)
+	if err := c.ReadOnly(false).Do(ctx); err != nil {
+		t.Fatalf("readonly off: %v", err)
+	}
+	var serverErr ServerError
+	if !errors.As(writeErr, &serverErr) {
+		t.Errorf("write in readonly mode = %v, want a server error", writeErr)
+	}
+
+	// TIMEOUT wraps another command with a server-side limit.
+	val, err := c.Timeout(ctx, 5, "SCAN", key, "COUNT")
+	if err != nil {
+		t.Fatalf("timeout: %v", err)
+	}
+	if n, ok := val.(int64); !ok || n != 2 {
+		t.Errorf("timeout scan count = %#v, want 2", val)
+	}
+}
+
 func TestServerErrorKeepsConnectionUsable(t *testing.T) {
 	c, key := newClient(t)
 	ctx := t.Context()
