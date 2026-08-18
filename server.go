@@ -9,6 +9,15 @@ import (
 	"fmt"
 )
 
+// Tile38 spells READONLY's off switch and the detach form of FOLLOW — "FOLLOW no
+// one" — with the same lowercase token. It is named here because it is the one
+// argument keyword this package repeats; the uppercase command keywords stay
+// spelled out at each call site, where they show the command being emitted.
+const (
+	tokenYes = "yes"
+	tokenNo  = "no"
+)
+
 // StatusCmd is a command that takes no chained options and answers with a
 // status: its entry point fixes every argument. Commands that do take options
 // get a type of their own, so that a builder's methods always describe what that
@@ -48,9 +57,9 @@ func (c *Client) AOFShrink() *StatusCmd {
 // ReadOnly starts building a Tile38 READONLY command, turning read-only mode on
 // or off. In read-only mode the server rejects every write.
 func (c *Client) ReadOnly(on bool) *StatusCmd {
-	mode := "no"
+	mode := tokenNo
 	if on {
-		mode = "yes"
+		mode = tokenYes
 	}
 	return &StatusCmd{c: c, name: "READONLY", args: []any{"READONLY", mode}}
 }
@@ -64,7 +73,7 @@ func (c *Client) Follow(host string, port int) *StatusCmd {
 // FollowNone starts building "FOLLOW no one", which promotes a replica back to a
 // leader. Tile38 spells it as a host of "no" and a port of "one".
 func (c *Client) FollowNone() *StatusCmd {
-	return &StatusCmd{c: c, name: "FOLLOW", args: []any{"FOLLOW", "no", "one"}}
+	return &StatusCmd{c: c, name: "FOLLOW", args: []any{"FOLLOW", tokenNo, "one"}}
 }
 
 // ConfigSet starts building a Tile38 CONFIG SET command. The change applies
