@@ -66,6 +66,28 @@ type SearchObject struct {
 	Fields  Fields
 }
 
+// RectResult holds a single result from a search using the BOUNDS output format.
+type RectResult struct {
+	ID     string
+	Bounds BoundsResult
+	Fields Fields
+}
+
+// HashResult holds a single result from a search using the HASHES output format.
+type HashResult struct {
+	ID     string
+	Hash   string // geohash at the precision the query asked for
+	Fields Fields
+}
+
+// A5Result holds a single result from a search using the A5 output format. A5 is
+// the one output format Tile38 does not attach fields to (scanner.go,
+// hasFieldsOutput).
+type A5Result struct {
+	ID   string
+	Cell string // A5 cell id at the level the query asked for
+}
+
 // BoundsResult holds the SW and NE corners of a bounding box.
 type BoundsResult struct {
 	SW [2]float64 // {lat, lon}

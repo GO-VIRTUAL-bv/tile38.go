@@ -176,32 +176,93 @@ func parseCount(prefix string, val any) (int, error) {
 	}
 }
 
-// parseObjects parses a Tile38 OBJECTS output response.
-// Tile38 returns: [cursor, [[id, geojson, [field, val, …]?], ...]]
-func parseObjects(prefix string, val any) ([]SearchObject, uint64, error) {
-	cursor, inner, err := searchReply(prefix+" Objects", val)
+// parseStringItems walks a search reply whose items are
+// [id, <bulk string>, [field, val, …]?] — the shape OBJECTS, HASHES, A5 and
+// SEARCH's default output all share, differing only in what the string means.
+// build turns one item into the caller's result type.
+func parseStringItems[T any](prefix string, val any, build func(id, value string, fields Fields) T) ([]T, uint64, error) {
+	cursor, inner, err := searchReply(prefix, val)
 	if err != nil {
 		return nil, 0, err
 	}
-	results := make([]SearchObject, 0, len(inner))
+	results := make([]T, 0, len(inner))
 	for _, item := range inner {
 		pair, ok := item.([]any)
 		if !ok || len(pair) < 2 {
-			return nil, 0, fmt.Errorf("tile38: %s Objects: unexpected item shape: %T", prefix, item)
+			return nil, 0, fmt.Errorf("tile38: %s: unexpected item shape: %T", prefix, item)
 		}
 		id, ok := pair[0].(string)
 		if !ok {
-			return nil, 0, fmt.Errorf("tile38: %s Objects: unexpected id type: %T", prefix, pair[0])
+			return nil, 0, fmt.Errorf("tile38: %s: unexpected id type: %T", prefix, pair[0])
 		}
-		geojson, ok := pair[1].(string)
+		value, ok := pair[1].(string)
 		if !ok {
-			return nil, 0, fmt.Errorf("tile38: %s Objects: unexpected geojson type: %T", prefix, pair[1])
+			return nil, 0, fmt.Errorf("tile38: %s: unexpected value type: %T", prefix, pair[1])
 		}
-		obj := SearchObject{ID: id, GeoJSON: geojson}
+		var fields Fields
 		if len(pair) > 2 {
-			obj.Fields = parseFields(pair[2])
+			fields = parseFields(pair[2])
 		}
-		results = append(results, obj)
+		results = append(results, build(id, value, fields))
+	}
+	return results, cursor, nil
+}
+
+// parseObjects parses a Tile38 OBJECTS output response.
+// Tile38 returns: [cursor, [[id, geojson, [field, val, …]?], ...]]
+func parseObjects(prefix string, val any) ([]SearchObject, uint64, error) {
+	return parseStringItems(prefix+" Objects", val,
+		func(id, geojson string, fields Fields) SearchObject {
+			return SearchObject{ID: id, GeoJSON: geojson, Fields: fields}
+		})
+}
+
+// parseHashes parses a Tile38 HASHES output response.
+// Tile38 returns: [cursor, [[id, geohash, [field, val, …]?], ...]]
+func parseHashes(prefix string, val any) ([]HashResult, uint64, error) {
+	return parseStringItems(prefix+" Hashes", val,
+		func(id, hash string, fields Fields) HashResult {
+			return HashResult{ID: id, Hash: hash, Fields: fields}
+		})
+}
+
+// parseA5Cells parses a Tile38 A5 output response.
+// Tile38 returns: [cursor, [[id, cell], ...]] — A5 is not one of the outputs
+// scanner.go attaches fields to, so an item never carries a third element.
+func parseA5Cells(prefix string, val any) ([]A5Result, uint64, error) {
+	return parseStringItems(prefix+" A5", val,
+		func(id, cell string, _ Fields) A5Result {
+			return A5Result{ID: id, Cell: cell}
+		})
+}
+
+// parseRects parses a Tile38 BOUNDS output response. Tile38 returns
+// [cursor, [[id, [[swlat, swlon], [nelat, nelon]], [field, val, …]?], ...]] —
+// lat first, as GET key id BOUNDS does, not the x-first order BOUNDS key uses.
+func parseRects(prefix string, val any) ([]RectResult, uint64, error) {
+	cursor, inner, err := searchReply(prefix+" Bounds", val)
+	if err != nil {
+		return nil, 0, err
+	}
+	results := make([]RectResult, 0, len(inner))
+	for _, item := range inner {
+		pair, ok := item.([]any)
+		if !ok || len(pair) < 2 {
+			return nil, 0, fmt.Errorf("tile38: %s Bounds: unexpected item shape: %T", prefix, item)
+		}
+		id, ok := pair[0].(string)
+		if !ok {
+			return nil, 0, fmt.Errorf("tile38: %s Bounds: unexpected id type: %T", prefix, pair[0])
+		}
+		box, err := parseBoundsResult(prefix, pair[1], false)
+		if err != nil {
+			return nil, 0, err
+		}
+		rect := RectResult{ID: id, Bounds: box}
+		if len(pair) > 2 {
+			rect.Fields = parseFields(pair[2])
+		}
+		results = append(results, rect)
 	}
 	return results, cursor, nil
 }
