@@ -31,20 +31,44 @@ func searchReply(prefix string, val any) (uint64, []any, error) {
 	return uint64(cursor), inner, nil
 }
 
+// parseCoords decodes a [lat, lon, z?] coordinate array. Tile38 appends the
+// third ordinate only when it is non-zero (scanner.go, extractZCoordinate), so a
+// two-element array and a zero z are the same thing on the wire.
+func parseCoords(prefix string, v any) (lat, lon, z float64, err error) {
+	coords, ok := v.([]any)
+	if !ok || len(coords) < 2 {
+		return 0, 0, 0, fmt.Errorf("tile38: %s: unexpected coords shape: %T", prefix, v)
+	}
+	if lat, err = toFloat64(coords[0]); err != nil {
+		return 0, 0, 0, fmt.Errorf("tile38: %s: lat: %w", prefix, err)
+	}
+	if lon, err = toFloat64(coords[1]); err != nil {
+		return 0, 0, 0, fmt.Errorf("tile38: %s: lon: %w", prefix, err)
+	}
+	if len(coords) > 2 {
+		if z, err = toFloat64(coords[2]); err != nil {
+			return 0, 0, 0, fmt.Errorf("tile38: %s: z: %w", prefix, err)
+		}
+	}
+	return lat, lon, z, nil
+}
+
 // parseNearbyPoints parses the RESP response from NEARBY ... POINTS.
-// Tile38 returns: [cursor, [[id, [lat, lon]], [id, [lat, lon]], ...]]
+// Tile38 returns: [cursor, [[id, [lat, lon], [field, val, …]?], ...]]
 func parseNearbyPoints(val any) ([]NearbyResult, uint64, error) {
 	return parsePoints("NearbyPoints", val)
 }
 
 // parseScanPoints parses the RESP response from SCAN ... POINTS.
-// Tile38 returns: [cursor, [[id, [lat, lon]], ...]]
+// Tile38 returns: [cursor, [[id, [lat, lon], [field, val, …]?], ...]]
 func parseScanPoints(val any) ([]NearbyResult, uint64, error) {
 	return parsePoints("ScanPoints", val)
 }
 
-// parsePoints is the shared implementation for both NEARBY and SCAN POINTS responses.
-// Both commands return [cursor, [[id, [lat, lon]], ...]] with identical structure.
+// parsePoints is the shared implementation for both NEARBY and SCAN POINTS
+// responses. Both return [cursor, [[id, [lat, lon, z?], [field, val, …]?], ...]]
+// — the fields array is present only when the object has non-zero fields,
+// exactly as it is on the OBJECTS output.
 func parsePoints(prefix string, val any) ([]NearbyResult, uint64, error) {
 	cursor, inner, err := searchReply(prefix, val)
 	if err != nil {
@@ -61,25 +85,21 @@ func parsePoints(prefix string, val any) ([]NearbyResult, uint64, error) {
 		if !ok {
 			return nil, 0, fmt.Errorf("tile38: %s: unexpected id type: %T", prefix, pair[0])
 		}
-		coords, ok := pair[1].([]any)
-		if !ok || len(coords) < 2 {
-			return nil, 0, fmt.Errorf("tile38: %s: unexpected coords shape: %T", prefix, pair[1])
-		}
-		lat, err := toFloat64(coords[0])
+		lat, lon, z, err := parseCoords(prefix, pair[1])
 		if err != nil {
-			return nil, 0, fmt.Errorf("tile38: %s: lat: %w", prefix, err)
+			return nil, 0, err
 		}
-		lon, err := toFloat64(coords[1])
-		if err != nil {
-			return nil, 0, fmt.Errorf("tile38: %s: lon: %w", prefix, err)
+		res := NearbyResult{ID: id, Lat: lat, Lon: lon, Z: z}
+		if len(pair) > 2 {
+			res.Fields = parseFields(pair[2])
 		}
-		results = append(results, NearbyResult{ID: id, Lat: lat, Lon: lon})
+		results = append(results, res)
 	}
 	return results, cursor, nil
 }
 
 // parsePointsWithDistance parses the NEARBY ... DISTANCE POINTS response.
-// Tile38 returns: [cursor, [[id, [lat, lon], [field, val, …]?, dist], ...]] —
+// Tile38 returns: [cursor, [[id, [lat, lon, z?], [field, val, …]?, dist], ...]] —
 // the fields array is present only when the object has non-zero fields, so the
 // distance is read from the end of the item rather than a fixed index.
 func parsePointsWithDistance(val any) ([]NearbyResultWithDistance, uint64, error) {
@@ -97,26 +117,22 @@ func parsePointsWithDistance(val any) ([]NearbyResultWithDistance, uint64, error
 		if !ok {
 			return nil, 0, fmt.Errorf("tile38: PointsWithDistance: unexpected id type: %T", pair[0])
 		}
-		coords, ok := pair[1].([]any)
-		if !ok || len(coords) < 2 {
-			return nil, 0, fmt.Errorf("tile38: PointsWithDistance: unexpected coords shape: %T", pair[1])
-		}
-		lat, err := toFloat64(coords[0])
+		lat, lon, z, err := parseCoords("PointsWithDistance", pair[1])
 		if err != nil {
-			return nil, 0, fmt.Errorf("tile38: PointsWithDistance: lat: %w", err)
-		}
-		lon, err := toFloat64(coords[1])
-		if err != nil {
-			return nil, 0, fmt.Errorf("tile38: PointsWithDistance: lon: %w", err)
+			return nil, 0, err
 		}
 		dist, err := toFloat64(pair[len(pair)-1])
 		if err != nil {
 			return nil, 0, fmt.Errorf("tile38: PointsWithDistance: dist: %w", err)
 		}
-		results = append(results, NearbyResultWithDistance{
-			NearbyResult: NearbyResult{ID: id, Lat: lat, Lon: lon},
+		res := NearbyResultWithDistance{
+			NearbyResult: NearbyResult{ID: id, Lat: lat, Lon: lon, Z: z},
 			Distance:     dist,
-		})
+		}
+		if len(pair) > 3 {
+			res.Fields = parseFields(pair[2])
+		}
+		results = append(results, res)
 	}
 	return results, cursor, nil
 }
@@ -161,7 +177,7 @@ func parseCount(prefix string, val any) (int, error) {
 }
 
 // parseObjects parses a Tile38 OBJECTS output response.
-// Tile38 returns: [cursor, [[id, geojson], [id, geojson], ...]]
+// Tile38 returns: [cursor, [[id, geojson, [field, val, …]?], ...]]
 func parseObjects(prefix string, val any) ([]SearchObject, uint64, error) {
 	cursor, inner, err := searchReply(prefix+" Objects", val)
 	if err != nil {
@@ -197,12 +213,12 @@ func parseObjects(prefix string, val any) ([]SearchObject, uint64, error) {
 // A shape it does not recognise yields no fields rather than an error. Fields
 // decorate a result; they do not define it, and failing the whole search over an
 // unexpected field encoding would lose the geometry too.
-func parseFields(v any) map[string]string {
+func parseFields(v any) Fields {
 	arr, ok := v.([]any)
 	if !ok || len(arr) == 0 || len(arr)%2 != 0 {
 		return nil
 	}
-	out := make(map[string]string, len(arr)/2)
+	out := make(Fields, len(arr)/2)
 	for i := 0; i+1 < len(arr); i += 2 {
 		name, ok := arr[i].(string)
 		if !ok {
@@ -270,8 +286,8 @@ func parseBoundsResult(prefix string, val any, lonFirst bool) (BoundsResult, err
 }
 
 // parseHooks parses a HOOKS or CHANS response into []HookInfo. Each descriptor
-// is [name, key, [endpoint …], [command token …], [meta …]]; channels report a
-// single "local://<name>" endpoint.
+// is [name, key, [endpoint …], [command token …], [meta name, value …]];
+// channels report a single "local://<name>" endpoint.
 func parseHooks(prefix string, val any) ([]HookInfo, error) {
 	outer, ok := val.([]any)
 	if !ok {
@@ -294,6 +310,10 @@ func parseHooks(prefix string, val any) ([]HookInfo, error) {
 		}
 		if len(desc) > 3 {
 			hook.Command, _ = parseStringSlice(prefix, desc[3])
+		}
+		if len(desc) > 4 {
+			// Meta arrives in the same flat [name, value, …] shape as fields.
+			hook.Meta = parseFields(desc[4])
 		}
 		hooks = append(hooks, hook)
 	}

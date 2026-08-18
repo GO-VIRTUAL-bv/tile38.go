@@ -27,9 +27,11 @@ type SetChanCmd struct {
 	commands []Command
 	nodwell  bool
 	geom     []any // fence area
+	radius   *int  // trailing metres of a POINT area
 }
 
-// Nearby selects the NEARBY spatial trigger. Use with Roam.
+// Nearby selects the NEARBY spatial trigger. Use with Point and Radius, or with
+// Roam.
 func (cmd *SetChanCmd) Nearby(collection string) *SetChanCmd {
 	cmd.trigger = []any{"NEARBY", collection}
 	return cmd
@@ -111,6 +113,22 @@ func (cmd *SetChanCmd) Circle(lat, lon float64, radius int) *SetChanCmd {
 	return cmd
 }
 
+// Point sets the fence area to a point, and is the area a Nearby trigger takes:
+// NEARBY reads "POINT lat lon meters" and rejects CIRCLE, so a channel fencing
+// on NEARBY needs this rather than Circle. Pair it with Radius.
+func (cmd *SetChanCmd) Point(lat, lon float64) *SetChanCmd {
+	cmd.geom = []any{"POINT", lat, lon}
+	return cmd
+}
+
+// Radius sets the trailing metres of a Point area. Named for the value it
+// carries: Tile38 has no keyword for it, it is the last argument of
+// "POINT lat lon meters".
+func (cmd *SetChanCmd) Radius(metres int) *SetChanCmd {
+	cmd.radius = &metres
+	return cmd
+}
+
 // Object sets the fence area to an inline GeoJSON string.
 func (cmd *SetChanCmd) Object(geojson string) *SetChanCmd {
 	cmd.geom = []any{"OBJECT", geojson}
@@ -128,7 +146,8 @@ func (cmd *SetChanCmd) Do(ctx context.Context) error {
 	head := hookHead([]any{"SETCHAN", cmd.name}, cmd.meta, cmd.ex)
 	head = append(head, cmd.trigger...)
 	args := buildSearch(append(head, cmd.args...), searchOpts{},
-		fenceTokens(cmd.detect, cmd.commands, cmd.nodwell), nil, cmd.geom)
+		fenceTokens(cmd.detect, cmd.commands, cmd.nodwell), nil,
+		pointGeometry(cmd.geom, cmd.radius))
 	if _, err := cmd.c.do(ctx, args...); err != nil {
 		return fmt.Errorf("tile38: SETCHAN: %w", err)
 	}

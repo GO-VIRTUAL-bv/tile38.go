@@ -84,6 +84,20 @@ Every search verb offers the four output formats — `IDs`, `Points`, `Count`,
 Filters are `Where`, `WhereIn`, and `Match`, which accumulate; `Limit`,
 `Cursor`, `Sparse`, `NoFields`, and `Clip` are single-use and overwrite.
 
+`Points` and `Objects` results carry the object's `Fields` beside its geometry,
+so reading a collection's state is one round trip rather than an `FGet` per
+field per object. Geofence notifications carry them too:
+
+```go
+for _, p := range pts {
+    log.Printf("%s at %v,%v doing %s", p.ID, p.Lat, p.Lon, p.Fields["speed"])
+}
+```
+
+Values are Tile38's own text encoding — the decimal form of a number, the
+verbatim JSON text of a JSON field — and are absent for an object whose fields
+are all zero or when the query used `NoFields`.
+
 ### Result limits
 
 **Tile38 caps every search except `Count` at 100 results when the command

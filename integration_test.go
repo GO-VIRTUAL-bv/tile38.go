@@ -279,6 +279,14 @@ func TestSearchOutputFormats(t *testing.T) {
 	if objs[0].Fields["speed"] != "10" {
 		t.Errorf("nearby object fields = %v, want speed=10", objs[0].Fields)
 	}
+	// POINTS carries the same fields array — on its own at the end, and before
+	// the distance when DISTANCE is asked for.
+	if pts[0].Fields["speed"] != "10" {
+		t.Errorf("nearby points fields = %v, want speed=10", pts[0].Fields)
+	}
+	if withDist[0].Fields["speed"] != "10" {
+		t.Errorf("nearby points-with-distance fields = %v, want speed=10", withDist[0].Fields)
+	}
 
 	if n, err = c.Nearby(key).Limit(1).Point(33.5, -115.5).Radius(5000).Count(ctx); err != nil || n != 1 {
 		t.Errorf("nearby limit 1 count = %d, %v; want 1, nil", n, err)
@@ -370,6 +378,64 @@ func TestScan(t *testing.T) {
 
 // Object bounds come back lat-first while collection bounds come back
 // lon-first; both must land in BoundsResult as {lat, lon}.
+// A point can carry a third ordinate, which Tile38 stores and echoes back but
+// omits from the reply whenever it is zero — so a two-element and a
+// three-element coordinate array turn up in the same response.
+func TestPointZ(t *testing.T) {
+	c, key := newClient(t)
+	ctx := t.Context()
+
+	if err := c.Set(key, "flying").Object(
+		`{"type":"Point","coordinates":[-115.5,33.5,120.5]}`).Do(ctx); err != nil {
+		t.Fatalf("set 3d: %v", err)
+	}
+	if err := c.Set(key, "ground").Point(33.6, -115.6).Do(ctx); err != nil {
+		t.Fatalf("set 2d: %v", err)
+	}
+
+	lat, lon, z, err := c.Get(key, "flying").PointZ(ctx)
+	if err != nil {
+		t.Fatalf("get point z: %v", err)
+	}
+	if lat != 33.5 || lon != -115.5 || z != 120.5 {
+		t.Errorf("get point z = %v,%v,%v; want 33.5,-115.5,120.5", lat, lon, z)
+	}
+	if _, _, z, err = c.Get(key, "ground").PointZ(ctx); err != nil || z != 0 {
+		t.Errorf("get 2d point z = %v, %v; want 0", z, err)
+	}
+
+	pts, err := c.Scan(key).Points(ctx)
+	if err != nil {
+		t.Fatalf("scan points: %v", err)
+	}
+	byID := map[string]NearbyResult{}
+	for _, p := range pts {
+		byID[p.ID] = p
+	}
+	if byID["flying"].Z != 120.5 {
+		t.Errorf("scan points z = %v, want 120.5", byID["flying"].Z)
+	}
+	if byID["ground"].Z != 0 {
+		t.Errorf("scan points 2d z = %v, want 0", byID["ground"].Z)
+	}
+
+	// The z lives inside the coordinate array, so the trailing distance must not
+	// be read as one or vice versa.
+	withDist, err := c.Nearby(key).Point(33.5, -115.5).Radius(100000).PointsWithDistance(ctx)
+	if err != nil {
+		t.Fatalf("points with distance: %v", err)
+	}
+	if len(withDist) != 2 || withDist[0].ID != "flying" {
+		t.Fatalf("points with distance = %+v", withDist)
+	}
+	if withDist[0].Z != 120.5 || withDist[0].Distance != 0 {
+		t.Errorf("nearest = %+v, want z 120.5 and distance 0", withDist[0])
+	}
+	if withDist[1].Z != 0 || withDist[1].Distance <= 0 {
+		t.Errorf("second = %+v, want z 0 and a positive distance", withDist[1])
+	}
+}
+
 func TestBoundsCoordinateOrder(t *testing.T) {
 	c, key := newClient(t)
 	ctx := t.Context()
@@ -653,7 +719,8 @@ func TestLiveFence(t *testing.T) {
 		}
 	}()
 
-	if err := c.Set(key, "rover").Point(33.5, -115.5).Do(ctx); err != nil {
+	if err := c.Set(key, "rover").Field("speed", 42).Field("driver", "bob").
+		Point(33.5, -115.5).Do(ctx); err != nil {
 		t.Fatalf("move in: %v", err)
 	}
 	enter := waitEvent(t, events, errs)
@@ -665,6 +732,11 @@ func TestLiveFence(t *testing.T) {
 	}
 	if len(enter.Object) == 0 {
 		t.Error("first event carried no object geojson")
+	}
+	// The notification carries the object's fields as JSON, so a consumer never
+	// has to go back to the server for the state that triggered the event.
+	if enter.Fields["speed"] != "42" || enter.Fields["driver"] != "bob" {
+		t.Errorf("first event fields = %v, want speed=42 driver=bob", enter.Fields)
 	}
 
 	if err := c.Set(key, "rover").Point(40, -100).Do(ctx); err != nil {
@@ -832,6 +904,7 @@ func TestHooks(t *testing.T) {
 	t.Cleanup(func() { _ = c.DelHook(hook).Do(context.Background()) })
 
 	if err := c.SetHook(hook).Endpoint("http://127.0.0.1:9999", "events").
+		Meta("team", "ops").
 		Within(key).Detect(Inside).Commands(CommandSet).Bounds(GlobalBounds()).Do(ctx); err != nil {
 		t.Fatalf("sethook: %v", err)
 	}
@@ -854,6 +927,25 @@ func TestHooks(t *testing.T) {
 	}
 	if len(found.Endpoints) == 0 || found.Endpoints[0] != "http://127.0.0.1:9999/events" {
 		t.Errorf("hook endpoints = %v", found.Endpoints)
+	}
+	// Element 4 of the descriptor is the META the hook was created with; without
+	// it a listing cannot tell two hooks on the same key apart.
+	if found.Meta["team"] != "ops" {
+		t.Errorf("hook meta = %v, want team=ops", found.Meta)
+	}
+
+	// NEARBY takes a POINT area and rejects CIRCLE, so this is the only shape a
+	// non-roaming NEARBY hook can take.
+	nearbyHook := key + "-hook-nearby"
+	t.Cleanup(func() { _ = c.DelHook(nearbyHook).Do(context.Background()) })
+	if err := c.SetHook(nearbyHook).Endpoint("http://127.0.0.1:9999", "events").
+		Nearby(key).Point(33.5, -115.5).Radius(5000).Do(ctx); err != nil {
+		t.Fatalf("sethook nearby: %v", err)
+	}
+	nearbyChan := key + "-chan-nearby"
+	t.Cleanup(func() { _ = c.DelChan(nearbyChan).Do(context.Background()) })
+	if err := c.SetChan(nearbyChan).Nearby(key).Point(33.5, -115.5).Radius(5000).Do(ctx); err != nil {
+		t.Fatalf("setchan nearby: %v", err)
 	}
 
 	if err := c.DelHook(hook).Do(ctx); err != nil {

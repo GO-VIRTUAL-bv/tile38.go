@@ -394,6 +394,34 @@ func TestHookAssembly(t *testing.T) {
 			want: []string{"SETHOOK", "h", "http://x/y", "NEARBY", "fleet", "FENCE",
 				"NODWELL", "ROAM", "targets", "*", "500"},
 		},
+		// NEARBY reads "POINT lat lon meters" and rejects CIRCLE, so a hook or
+		// channel fencing on NEARBY needs its own POINT area — without one the
+		// trigger cannot emit a command the server accepts at all.
+		"nearby point area": {
+			build: func(c *Client) error {
+				return c.SetChan("zone").Nearby("fleet").Point(33.5, -115.5).Radius(5000).Do(t.Context())
+			},
+			want: []string{"SETCHAN", "zone", "NEARBY", "fleet", "FENCE",
+				"POINT", "33.5", "-115.5", "5000"},
+		},
+		// The radius is the trailing argument of the area, so it has to attach at
+		// exec time rather than in call order.
+		"nearby point area, radius chained first": {
+			build: func(c *Client) error {
+				return c.SetHook("h").Radius(5000).Endpoint("http://x", "y").
+					Detect(Enter).Nearby("fleet").Point(33.5, -115.5).Do(t.Context())
+			},
+			want: []string{"SETHOOK", "h", "http://x/y", "NEARBY", "fleet", "FENCE",
+				"DETECT", "enter", "POINT", "33.5", "-115.5", "5000"},
+		},
+		// A ROAM area carries its own radius, so a stray Radius must not attach.
+		"radius never attaches to roam": {
+			build: func(c *Client) error {
+				return c.SetChan("zone").Nearby("fleet").Radius(5000).Roam("targets", 500).Do(t.Context())
+			},
+			want: []string{"SETCHAN", "zone", "NEARBY", "fleet", "FENCE",
+				"ROAM", "targets", "*", "500"},
+		},
 		// MATCH is an option on the trigger collection: it renders after WITHIN
 		// and before the FENCE clause, whichever order it is chained in.
 		"match filters the trigger before the fence": {
@@ -799,7 +827,7 @@ func TestObjectsDecodeFields(t *testing.T) {
 
 	tests := map[string]struct {
 		item string
-		want map[string]string
+		want Fields
 	}{
 		"no fields element": {
 			item: wire("*2", "$1", "a", "$41", point),
@@ -807,12 +835,12 @@ func TestObjectsDecodeFields(t *testing.T) {
 		},
 		"numeric field keeps Tile38's own text": {
 			item: wire("*3", "$1", "b", "$41", point, "*2", "$5", "speed", "$4", "12.5"),
-			want: map[string]string{"speed": "12.5"},
+			want: Fields{"speed": "12.5"},
 		},
 		"json field survives verbatim": {
 			item: wire("*3", "$1", "c", "$41", point,
 				"*4", "$8", "hardware", "$29", `{"battery":{"percentage":80}}`, "$5", "speed", "$1", "3"),
-			want: map[string]string{"hardware": `{"battery":{"percentage":80}}`, "speed": "3"},
+			want: Fields{"hardware": `{"battery":{"percentage":80}}`, "speed": "3"},
 		},
 		// Rather than fail the search and lose the geometry with it.
 		"unpaired fields array is dropped": {
@@ -845,4 +873,173 @@ func TestObjectsDecodeFields(t *testing.T) {
 			}
 		})
 	}
+}
+
+// POINTS output carries the same trailing FIELDS array as OBJECTS, and with
+// DISTANCE it sits between the coordinates and the distance rather than at the
+// end. Both were read as geometry-only, so every field on a Points query was
+// silently dropped.
+func TestPointsDecodeFields(t *testing.T) {
+	const coords = "*2\r\n$4\r\n51.2\r\n$3\r\n4.4"
+	const fields = "*4\r\n$5\r\nspeed\r\n$4\r\n12.5\r\n$6\r\ndriver\r\n$3\r\nbob"
+
+	t.Run("points", func(t *testing.T) {
+		addr := fakeServer(t, func(r *bufio.Reader, w net.Conn) {
+			_ = readCommand(t, r)
+			_, _ = io.WriteString(w, "*2\r\n:0\r\n*1\r\n*3\r\n$1\r\na\r\n"+coords+"\r\n"+fields+"\r\n")
+		})
+		c := New(addr)
+		defer c.Close()
+
+		res, err := c.Nearby("fleet").Point(51.2, 4.4).Radius(100).Points(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := []NearbyResult{{ID: "a", Lat: 51.2, Lon: 4.4, Fields: Fields{"speed": "12.5", "driver": "bob"}}}
+		if !reflect.DeepEqual(res, want) {
+			t.Errorf("points = %+v, want %+v", res, want)
+		}
+	})
+
+	t.Run("points with distance", func(t *testing.T) {
+		addr := fakeServer(t, func(r *bufio.Reader, w net.Conn) {
+			_ = readCommand(t, r)
+			_, _ = io.WriteString(w, "*2\r\n:0\r\n*1\r\n*4\r\n$1\r\na\r\n"+coords+"\r\n"+fields+"\r\n$3\r\n120\r\n")
+		})
+		c := New(addr)
+		defer c.Close()
+
+		res, err := c.Nearby("fleet").Point(51.2, 4.4).Radius(100).PointsWithDistance(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := []NearbyResultWithDistance{{
+			NearbyResult: NearbyResult{ID: "a", Lat: 51.2, Lon: 4.4, Fields: Fields{"speed": "12.5", "driver": "bob"}},
+			Distance:     120,
+		}}
+		if !reflect.DeepEqual(res, want) {
+			t.Errorf("points with distance = %+v, want %+v", res, want)
+		}
+	})
+
+	// No fields array: the third element of a DISTANCE item is the distance, and
+	// reading it as fields would be worse than dropping it.
+	t.Run("distance only", func(t *testing.T) {
+		addr := fakeServer(t, func(r *bufio.Reader, w net.Conn) {
+			_ = readCommand(t, r)
+			_, _ = io.WriteString(w, "*2\r\n:0\r\n*1\r\n*3\r\n$1\r\na\r\n"+coords+"\r\n$3\r\n120\r\n")
+		})
+		c := New(addr)
+		defer c.Close()
+
+		res, err := c.Nearby("fleet").Point(51.2, 4.4).Radius(100).PointsWithDistance(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(res) != 1 || res[0].Fields != nil || res[0].Distance != 120 {
+			t.Errorf("points with distance = %+v, want one item, no fields, dist 120", res)
+		}
+	})
+}
+
+// A fence notification writes fields as JSON — a string field arrives quoted,
+// everything else as its JSON text — where a search reply sends the same values
+// as flat strings. Both have to land in the same Fields shape.
+func TestFenceEventDecodesFieldsAndMeta(t *testing.T) {
+	const payload = `{"command":"set","detect":"enter","hook":"h1","meta":{"owner":"ops"},` +
+		`"key":"fleet","id":"t1","object":{"type":"Point","coordinates":[4.4,51.2]},` +
+		`"fields":{"speed":42,"driver":"bob","hardware":{"battery":80}}}`
+
+	ev, err := DecodeFenceEvent([]byte(payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := Fields{"speed": "42", "driver": "bob", "hardware": `{"battery":80}`}
+	if !reflect.DeepEqual(ev.Fields, want) {
+		t.Errorf("fields = %v, want %v", ev.Fields, want)
+	}
+	if !reflect.DeepEqual(ev.Meta, map[string]string{"owner": "ops"}) {
+		t.Errorf("meta = %v, want owner=ops", ev.Meta)
+	}
+}
+
+// Tile38 appends a third ordinate to a coordinate array only when it is
+// non-zero, so both lengths arrive in the same reply and a parse that stops at
+// lon drops whatever the caller stored there.
+func TestPointsDecodeZ(t *testing.T) {
+	const flat = "*2\r\n$4\r\n51.2\r\n$3\r\n4.4"
+	const withZ = "*3\r\n$4\r\n51.2\r\n$3\r\n4.4\r\n$5\r\n100.5"
+
+	t.Run("points", func(t *testing.T) {
+		addr := fakeServer(t, func(r *bufio.Reader, w net.Conn) {
+			_ = readCommand(t, r)
+			_, _ = io.WriteString(w, "*2\r\n:0\r\n*2\r\n"+
+				"*2\r\n$1\r\na\r\n"+withZ+"\r\n"+
+				"*2\r\n$1\r\nb\r\n"+flat+"\r\n")
+		})
+		c := New(addr)
+		defer c.Close()
+
+		res, err := c.Scan("fleet").Points(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := []NearbyResult{
+			{ID: "a", Lat: 51.2, Lon: 4.4, Z: 100.5},
+			{ID: "b", Lat: 51.2, Lon: 4.4},
+		}
+		if !reflect.DeepEqual(res, want) {
+			t.Errorf("points = %+v, want %+v", res, want)
+		}
+	})
+
+	// With DISTANCE the z sits inside the coordinate array, so it must not be
+	// confused with the trailing distance.
+	t.Run("points with distance and fields", func(t *testing.T) {
+		addr := fakeServer(t, func(r *bufio.Reader, w net.Conn) {
+			_ = readCommand(t, r)
+			_, _ = io.WriteString(w, "*2\r\n:0\r\n*1\r\n*4\r\n$1\r\na\r\n"+withZ+
+				"\r\n*2\r\n$5\r\nspeed\r\n$2\r\n42\r\n$3\r\n120\r\n")
+		})
+		c := New(addr)
+		defer c.Close()
+
+		res, err := c.Nearby("fleet").Point(1, 2).Radius(3).PointsWithDistance(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := []NearbyResultWithDistance{{
+			NearbyResult: NearbyResult{ID: "a", Lat: 51.2, Lon: 4.4, Z: 100.5, Fields: Fields{"speed": "42"}},
+			Distance:     120,
+		}}
+		if !reflect.DeepEqual(res, want) {
+			t.Errorf("points with distance = %+v, want %+v", res, want)
+		}
+	})
+
+	// GET POINT carries the same optional ordinate; Point drops it by contract,
+	// PointZ is the terminal that keeps it.
+	t.Run("get point", func(t *testing.T) {
+		addr, _ := fakeServerN(t, func(r *bufio.Reader, w net.Conn) {
+			for {
+				if _, err := resp.ReadReply(r); err != nil {
+					return
+				}
+				_, _ = io.WriteString(w, withZ+"\r\n")
+			}
+		})
+		c := New(addr)
+		defer c.Close()
+
+		lat, lon, z, err := c.Get("fleet", "truck1").PointZ(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if lat != 51.2 || lon != 4.4 || z != 100.5 {
+			t.Errorf("point z = %v,%v,%v; want 51.2,4.4,100.5", lat, lon, z)
+		}
+		if lat, lon, err = c.Get("fleet", "truck1").Point(t.Context()); err != nil || lat != 51.2 || lon != 4.4 {
+			t.Errorf("point = %v,%v,%v; want 51.2,4.4", lat, lon, err)
+		}
+	})
 }

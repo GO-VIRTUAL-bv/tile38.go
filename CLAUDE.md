@@ -200,9 +200,26 @@ Do not "correct" them back without re-testing.
   (`fence.go` reads it in the roam matching path alone).
 - `DISTANCE` is an **option** token, so it precedes the output format:
   `NEARBY key DISTANCE POINTS POINT …`, not `POINTS DISTANCE`.
+- Every output format except `IDS` and `COUNT` appends the object's fields as a
+  flat `[name, value, …]` array, present only when the object has non-zero
+  fields: `OBJECTS` gives `[id, geojson, [fields…]?]`, `POINTS` gives
+  `[id, [lat, lon], [fields…]?]`. `parseFields` decodes it into the public
+  `Fields` type; a parse path that stops at the geometry silently drops every
+  field the caller asked the server for.
+- A coordinate array is `[lat, lon]` or `[lat, lon, z]`: Tile38 appends the third
+  ordinate only when it is non-zero (`extractZCoordinate`), on `POINTS` output
+  and on `GET key id POINT` alike, so both lengths turn up in one reply and a
+  zero z is indistinguishable from a two-dimensional point. `parseCoords` is the
+  one place that decodes it.
 - With `DISTANCE POINTS`, an item is `[id, [lat, lon], [fields…]?, dist]`. The
   fields array appears only when the object has non-zero fields, so distance is
-  read from the **end** of the item, not a fixed index.
+  read from the **end** of the item, not a fixed index — and the fields are only
+  there when the item is longer than three elements.
+- A geofence notification carries `"fields"` as a JSON **object** (`sw.fullFields`
+  in `fence.go`), where the RESP search replies send the same values as flat
+  text: a string field arrives quoted. `Fields.UnmarshalJSON` unquotes it so a
+  field reads identically whichever path it arrived on. Hook and channel events
+  also carry `"meta"`.
 - Coordinate order differs by command: `GET key id BOUNDS` returns
   `[[swlat, swlon], [nelat, nelon]]`, while `BOUNDS key` returns the collection
   extent x-first as `[[minlon, minlat], [maxlon, maxlat]]`.

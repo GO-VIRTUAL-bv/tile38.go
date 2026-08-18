@@ -146,6 +146,16 @@ func buildSearch(args []any, opts searchOpts, fence []any, format []string, geom
 	return append(out, geom...)
 }
 
+// pointGeometry appends the trailing metres of Tile38's "POINT lat lon meters",
+// and only to a POINT: a ROAM area carries its own radius, so attaching it there
+// would malform the command whichever order the two were chained in.
+func pointGeometry(geom []any, radius *int) []any {
+	if radius == nil || len(geom) == 0 || geom[0] != "POINT" {
+		return geom
+	}
+	return append(append([]any{}, geom...), *radius)
+}
+
 // hookHead renders the META and EX clauses, which sit between a hook's name and
 // endpoint and its spatial trigger. Tile38 parses both in the same loop, so
 // their order relative to each other is free.
@@ -332,22 +342,20 @@ type GetCmd struct {
 }
 
 // Point executes: GET collection id POINT — returns the lat/lon of the object.
+// Use PointZ for an object stored with a third ordinate.
 func (cmd *GetCmd) Point(ctx context.Context) (lat, lon float64, err error) {
+	lat, lon, _, err = cmd.PointZ(ctx)
+	return lat, lon, err
+}
+
+// PointZ executes: GET collection id POINT — returns the lat/lon of the object
+// along with its third ordinate, which Tile38 appends only when it is non-zero.
+func (cmd *GetCmd) PointZ(ctx context.Context) (lat, lon, z float64, err error) {
 	val, err := cmd.c.do(ctx, append(cmd.args, "POINT")...)
 	if err != nil {
-		return 0, 0, fmt.Errorf("tile38: GET POINT: %w", err)
+		return 0, 0, 0, fmt.Errorf("tile38: GET POINT: %w", err)
 	}
-	outer, ok := val.([]any)
-	if !ok || len(outer) < 2 {
-		return 0, 0, fmt.Errorf("tile38: GET POINT: unexpected response shape: %T", val)
-	}
-	if lat, err = toFloat64(outer[0]); err != nil {
-		return 0, 0, fmt.Errorf("tile38: GET POINT lat: %w", err)
-	}
-	if lon, err = toFloat64(outer[1]); err != nil {
-		return 0, 0, fmt.Errorf("tile38: GET POINT lon: %w", err)
-	}
-	return lat, lon, nil
+	return parseCoords("GET POINT", val)
 }
 
 // Object executes: GET collection id — returns the raw GeoJSON string.
@@ -511,14 +519,9 @@ func (cmd *NearbyCmd) NoDwell() *NearbyCmd {
 	return cmd
 }
 
-// geometry returns the search area, appending the radius only to a POINT — a
-// ROAM area already carries its own, so attaching it there would malform the
-// command whichever order the two were chained in.
+// geometry returns the search area with its trailing radius.
 func (cmd *NearbyCmd) geometry() []any {
-	if cmd.radius == nil || len(cmd.geom) == 0 || cmd.geom[0] != "POINT" {
-		return cmd.geom
-	}
-	return append(append([]any{}, cmd.geom...), *cmd.radius)
+	return pointGeometry(cmd.geom, cmd.radius)
 }
 
 func (cmd *NearbyCmd) execArgs(format ...string) []any {
@@ -961,6 +964,7 @@ type HookCmd struct {
 	commands  []Command
 	nodwell   bool
 	geom      []any // fence area
+	radius    *int  // trailing metres of a POINT area
 }
 
 // Endpoint adds a target endpoint built by joining a base URL and a subject or
@@ -982,7 +986,8 @@ func (cmd *HookCmd) EndpointURL(urls ...string) *HookCmd {
 	return cmd
 }
 
-// Nearby selects the NEARBY spatial trigger. Use with Roam.
+// Nearby selects the NEARBY spatial trigger. Use with Point and Radius, or with
+// Roam.
 func (cmd *HookCmd) Nearby(collection string) *HookCmd {
 	cmd.trigger = []any{"NEARBY", collection}
 	return cmd
@@ -1072,6 +1077,22 @@ func (cmd *HookCmd) Circle(lat, lon float64, radius int) *HookCmd {
 	return cmd
 }
 
+// Point sets the fence area to a point, and is the area a Nearby trigger takes:
+// NEARBY reads "POINT lat lon meters" and rejects CIRCLE, so a hook or channel
+// fencing on NEARBY needs this rather than Circle. Pair it with Radius.
+func (cmd *HookCmd) Point(lat, lon float64) *HookCmd {
+	cmd.geom = []any{"POINT", lat, lon}
+	return cmd
+}
+
+// Radius sets the trailing metres of a Point area. Named for the value it
+// carries: Tile38 has no keyword for it, it is the last argument of
+// "POINT lat lon meters".
+func (cmd *HookCmd) Radius(metres int) *HookCmd {
+	cmd.radius = &metres
+	return cmd
+}
+
 // Object sets the fence area to an inline GeoJSON string.
 func (cmd *HookCmd) Object(geojson string) *HookCmd {
 	cmd.geom = []any{"OBJECT", geojson}
@@ -1089,7 +1110,8 @@ func (cmd *HookCmd) Do(ctx context.Context) error {
 	head := hookHead([]any{"SETHOOK", cmd.name, strings.Join(cmd.endpoints, ",")}, cmd.meta, cmd.ex)
 	head = append(head, cmd.trigger...)
 	args := buildSearch(append(head, cmd.args...), searchOpts{},
-		fenceTokens(cmd.detect, cmd.commands, cmd.nodwell), nil, cmd.geom)
+		fenceTokens(cmd.detect, cmd.commands, cmd.nodwell), nil,
+		pointGeometry(cmd.geom, cmd.radius))
 	if _, err := cmd.c.do(ctx, args...); err != nil {
 		return fmt.Errorf("tile38: SETHOOK: %w", err)
 	}
