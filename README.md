@@ -1,5 +1,10 @@
 # tile38.go
 
+[![Go Reference](https://pkg.go.dev/badge/github.com/GO-VIRTUAL-bv/tile38.go.svg)](https://pkg.go.dev/github.com/GO-VIRTUAL-bv/tile38.go)
+[![Lint and Test](https://github.com/GO-VIRTUAL-bv/tile38.go/actions/workflows/lint-and-test.yml/badge.svg)](https://github.com/GO-VIRTUAL-bv/tile38.go/actions/workflows/lint-and-test.yml)
+[![Release](https://img.shields.io/github/v/release/GO-VIRTUAL-bv/tile38.go?label=release)](https://github.com/GO-VIRTUAL-bv/tile38.go/releases)
+[![License](https://img.shields.io/badge/license-MPL--2.0-blue.svg)](LICENSE)
+
 A [Tile38](https://tile38.com) client for Go with a fluent query builder and
 **live geofence streaming**. No dependencies outside the standard library.
 
