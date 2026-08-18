@@ -1,0 +1,14 @@
+{
+  "name": "tile38",
+  "description": "Skill for using the tile38.go Go client — connect, query, and stream live geofences against a Tile38 geospatial database.",
+  "version": "0.1.0",
+  "author": {
+    "name": "GO-VIRTUAL",
+    "url": "https://github.com/GO-VIRTUAL-bv"
+  },
+  "homepage": "https://github.com/GO-VIRTUAL-bv/tile38.go",
+  "repository": "https://github.com/GO-VIRTUAL-bv/tile38.go",
+  "license": "MPL-2.0",
+  "keywords": ["tile38", "geospatial", "geofence", "go", "golang"],
+  "skills": ["./.claude/skills/tile38"]
+}

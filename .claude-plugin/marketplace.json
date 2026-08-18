@@ -1,0 +1,15 @@
+{
+  "name": "go-virtual",
+  "description": "Claude Code skills from GO-VIRTUAL, starting with the tile38.go client.",
+  "owner": {
+    "name": "GO-VIRTUAL",
+    "url": "https://github.com/GO-VIRTUAL-bv"
+  },
+  "plugins": [
+    {
+      "name": "tile38",
+      "source": "./",
+      "description": "Skill for using the tile38.go Go client — connect, query, and stream live geofences against a Tile38 geospatial database."
+    }
+  ]
+}
