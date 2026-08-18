@@ -337,8 +337,53 @@ func (cmd *FGetCmd) Do(ctx context.Context) (string, error) {
 
 // GetCmd builds a Tile38 GET command.
 type GetCmd struct {
-	c    *Client
-	args []any
+	c          *Client
+	args       []any
+	withFields bool
+	fields     Fields // recorded by the last terminal when WithFields is set
+}
+
+// WithFields asks for the object's fields alongside its geometry, matching
+// Tile38's WITHFIELDS keyword. It applies to every output format; read the
+// fields with Fields once the terminal has returned:
+//
+//	g := c.Get("fleet", "truck1").WithFields()
+//	lat, lon, err := g.Point(ctx)
+//	speed := g.Fields()["speed"]
+//
+// One GET then answers what would otherwise take an FGet per field.
+func (cmd *GetCmd) WithFields() *GetCmd {
+	cmd.withFields = true
+	return cmd
+}
+
+// Fields returns the fields read by the most recent terminal. It is nil until a
+// terminal has run, when WithFields was not chained, or when the object has no
+// non-zero fields — Tile38 omits the fields element entirely in that case.
+func (cmd *GetCmd) Fields() Fields { return cmd.fields }
+
+// exec runs the GET and unwraps the envelope WITHFIELDS puts around the reply:
+// [value] for an object with no non-zero fields and [value, [name, val, …]]
+// otherwise. Doing it here is what lets every output format carry fields.
+func (cmd *GetCmd) exec(ctx context.Context, format ...any) (any, error) {
+	args := make([]any, 0, len(cmd.args)+len(format)+1)
+	args = append(args, cmd.args...)
+	if cmd.withFields {
+		args = append(args, "WITHFIELDS")
+	}
+	val, err := cmd.c.do(ctx, append(args, format...)...)
+	if err != nil || !cmd.withFields || val == nil {
+		return val, err
+	}
+	outer, ok := val.([]any)
+	if !ok || len(outer) == 0 {
+		return nil, fmt.Errorf("tile38: GET WITHFIELDS: unexpected response shape: %T", val)
+	}
+	cmd.fields = nil
+	if len(outer) > 1 {
+		cmd.fields = parseFields(outer[1])
+	}
+	return outer[0], nil
 }
 
 // Point executes: GET collection id POINT — returns the lat/lon of the object.
@@ -351,7 +396,7 @@ func (cmd *GetCmd) Point(ctx context.Context) (lat, lon float64, err error) {
 // PointZ executes: GET collection id POINT — returns the lat/lon of the object
 // along with its third ordinate, which Tile38 appends only when it is non-zero.
 func (cmd *GetCmd) PointZ(ctx context.Context) (lat, lon, z float64, err error) {
-	val, err := cmd.c.do(ctx, append(cmd.args, "POINT")...)
+	val, err := cmd.exec(ctx, "POINT")
 	if err != nil {
 		return 0, 0, 0, fmt.Errorf("tile38: GET POINT: %w", err)
 	}
@@ -360,7 +405,7 @@ func (cmd *GetCmd) PointZ(ctx context.Context) (lat, lon, z float64, err error) 
 
 // Object executes: GET collection id — returns the raw GeoJSON string.
 func (cmd *GetCmd) Object(ctx context.Context) (string, error) {
-	val, err := cmd.c.do(ctx, cmd.args...)
+	val, err := cmd.exec(ctx)
 	if err != nil {
 		return "", fmt.Errorf("tile38: GET: %w", err)
 	}
@@ -373,7 +418,7 @@ func (cmd *GetCmd) Object(ctx context.Context) (string, error) {
 
 // Bounds executes: GET collection id BOUNDS — returns the bounding box of the object.
 func (cmd *GetCmd) Bounds(ctx context.Context) (BoundsResult, error) {
-	val, err := cmd.c.do(ctx, append(cmd.args, "BOUNDS")...)
+	val, err := cmd.exec(ctx, "BOUNDS")
 	if err != nil {
 		return BoundsResult{}, fmt.Errorf("tile38: GET BOUNDS: %w", err)
 	}
@@ -382,7 +427,7 @@ func (cmd *GetCmd) Bounds(ctx context.Context) (BoundsResult, error) {
 
 // Hash executes: GET collection id HASH precision — returns the geohash at the given precision.
 func (cmd *GetCmd) Hash(ctx context.Context, precision int) (string, error) {
-	val, err := cmd.c.do(ctx, append(cmd.args, "HASH", precision)...)
+	val, err := cmd.exec(ctx, "HASH", precision)
 	if err != nil {
 		return "", fmt.Errorf("tile38: GET HASH: %w", err)
 	}
@@ -398,7 +443,7 @@ func (cmd *GetCmd) Hash(ctx context.Context, precision int) (string, error) {
 // take as their area. Requires a server built from upstream master: A5 is
 // merged upstream but has shipped in no release tag as of 1.38.0.
 func (cmd *GetCmd) A5(ctx context.Context, level int) (string, error) {
-	val, err := cmd.c.do(ctx, append(cmd.args, "A5", level)...)
+	val, err := cmd.exec(ctx, "A5", level)
 	if err != nil {
 		return "", fmt.Errorf("tile38: GET A5: %w", err)
 	}
