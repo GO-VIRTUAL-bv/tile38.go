@@ -26,6 +26,7 @@ type SetChanCmd struct {
 	detect   []DetectState
 	commands []Command
 	nodwell  bool
+	distance bool
 	geom     []any // fence area
 	radius   *int  // trailing metres of a POINT area
 }
@@ -100,6 +101,15 @@ func (cmd *SetChanCmd) NoDwell() *SetChanCmd {
 	return cmd
 }
 
+// Distance adds each object's distance from the fence centre to every event the
+// fence produces, matching Tile38's DISTANCE keyword. It arrives on FenceEvent
+// as Distance, and applies to the live fence only — a plain query reads the same
+// value through PointsWithDistance.
+func (cmd *SetChanCmd) Distance() *SetChanCmd {
+	cmd.distance = true
+	return cmd
+}
+
 // Bounds sets the fence area to a lat/lon bounding box. Pass GlobalBounds() to
 // fence the whole world.
 func (cmd *SetChanCmd) Bounds(swLat, swLon, neLat, neLon float64) *SetChanCmd {
@@ -135,6 +145,28 @@ func (cmd *SetChanCmd) Object(geojson string) *SetChanCmd {
 	return cmd
 }
 
+// Sector sets the search area to a circular sector: a circle of radius metres
+// centred on lat/lon, clipped to the arc between two compass bearings in
+// degrees. Matches Tile38's SECTOR keyword, which NEARBY does not accept.
+func (cmd *SetChanCmd) Sector(lat, lon float64, metres int, bearing1, bearing2 float64) *SetChanCmd {
+	cmd.geom = []any{"SECTOR", lat, lon, metres, bearing1, bearing2}
+	return cmd
+}
+
+// Hash sets the search area to the box a geohash covers, matching Tile38's HASH
+// keyword. The shorter the hash, the larger the box.
+func (cmd *SetChanCmd) Hash(geohash string) *SetChanCmd {
+	cmd.geom = []any{"HASH", geohash}
+	return cmd
+}
+
+// QuadKey sets the search area to the tile a Bing Maps quadkey names, matching
+// Tile38's QUADKEY keyword. Tile is the same area expressed as x/y/z.
+func (cmd *SetChanCmd) QuadKey(quadkey string) *SetChanCmd {
+	cmd.geom = []any{"QUADKEY", quadkey}
+	return cmd
+}
+
 // Get sets the fence area to an object already stored in Tile38.
 func (cmd *SetChanCmd) Get(collection, id string) *SetChanCmd {
 	cmd.geom = []any{"GET", collection, id}
@@ -146,7 +178,7 @@ func (cmd *SetChanCmd) Do(ctx context.Context) error {
 	head := hookHead([]any{"SETCHAN", cmd.name}, cmd.meta, cmd.ex)
 	head = append(head, cmd.trigger...)
 	args := buildSearch(append(head, cmd.args...), searchOpts{},
-		fenceTokens(cmd.detect, cmd.commands, cmd.nodwell), nil,
+		fenceTokens(cmd.distance, cmd.detect, cmd.commands, cmd.nodwell), nil,
 		pointGeometry(cmd.geom, cmd.radius))
 	if _, err := cmd.c.do(ctx, args...); err != nil {
 		return fmt.Errorf("tile38: SETCHAN: %w", err)

@@ -422,8 +422,6 @@ func TestScan(t *testing.T) {
 	}
 }
 
-// Object bounds come back lat-first while collection bounds come back
-// lon-first; both must land in BoundsResult as {lat, lon}.
 // A point can carry a third ordinate, which Tile38 stores and echoes back but
 // omits from the reply whenever it is zero — so a two-element and a
 // three-element coordinate array turn up in the same response.
@@ -482,6 +480,66 @@ func TestPointZ(t *testing.T) {
 	}
 }
 
+// The option and area tokens are only worth having if a real server accepts
+// them, and each of these is rejected by at least one other verb.
+func TestOptionsAndAreas(t *testing.T) {
+	c, key := newClient(t)
+	ctx := t.Context()
+
+	if err := c.Set(key, "a").Field("speed", 10).Point(33.5, -115.5).Do(ctx); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	if err := c.Set(key, "b").Field("speed", 20).Point(33.6, -115.6).Do(ctx); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+
+	// SCAN is the only search verb that takes an order; NEARBY answers
+	// "DESC is not allowed for NEARBY".
+	asc, err := c.Scan(key).Asc().IDs(ctx)
+	if err != nil {
+		t.Fatalf("scan asc: %v", err)
+	}
+	desc, err := c.Scan(key).Desc().IDs(ctx)
+	if err != nil {
+		t.Fatalf("scan desc: %v", err)
+	}
+	if len(asc) != 2 || asc[0] != "a" || len(desc) != 2 || desc[0] != "b" {
+		t.Errorf("asc = %v, desc = %v; want a-first and b-first", asc, desc)
+	}
+
+	ids, err := c.Scan(key).WhereEval("return FIELDS.speed > tonumber(ARGV[1])", 15).IDs(ctx)
+	if err != nil {
+		t.Fatalf("whereeval: %v", err)
+	}
+	if len(ids) != 1 || ids[0] != "b" {
+		t.Errorf("whereeval ids = %v, want [b]", ids)
+	}
+
+	// BUFFER grows the area; Tile38 only buffers point-like areas, so this uses a
+	// circle rather than a bounding box.
+	near, err := c.Intersects(key).Buffer(50000).Circle(33.5, -115.5, 10).Count(ctx)
+	if err != nil {
+		t.Fatalf("buffer: %v", err)
+	}
+	if bare, err := c.Intersects(key).Circle(33.5, -115.5, 10).Count(ctx); err != nil || near <= bare {
+		t.Errorf("buffered count = %d, unbuffered = %d, err %v; want buffered to match more", near, bare, err)
+	}
+
+	// SECTOR, HASH and QUADKEY are areas WITHIN and INTERSECTS take and NEARBY
+	// rejects outright.
+	if n, err := c.Within(key).Sector(33.5, -115.5, 100000, 270, 360).Count(ctx); err != nil || n == 0 {
+		t.Errorf("sector count = %d, %v; want > 0", n, err)
+	}
+	if n, err := c.Within(key).Hash("9mv").Count(ctx); err != nil || n == 0 {
+		t.Errorf("hash count = %d, %v; want > 0", n, err)
+	}
+	if _, err := c.Intersects(key).QuadKey("023").Count(ctx); err != nil {
+		t.Errorf("quadkey: %v", err)
+	}
+}
+
+// Object bounds come back lat-first while collection bounds come back
+// lon-first; both must land in BoundsResult as {lat, lon}.
 func TestBoundsCoordinateOrder(t *testing.T) {
 	c, key := newClient(t)
 	ctx := t.Context()
@@ -803,6 +861,39 @@ func TestLiveFence(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Error("Next still blocked 5s after Close")
+	}
+}
+
+// DISTANCE on a fence adds the distance from the fence centre to every event,
+// which is the only way to get it out of a live fence.
+func TestLiveFenceDistance(t *testing.T) {
+	c, key := newClient(t)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+
+	st, err := c.Nearby(key).Distance().Detect(Enter).Point(33.5, -115.5).Radius(100000).Fence(ctx)
+	if err != nil {
+		t.Fatalf("fence: %v", err)
+	}
+	defer st.Close()
+
+	events := make(chan *FenceEvent, 4)
+	errs := make(chan error, 1)
+	go func() {
+		ev, err := st.Next()
+		if err != nil {
+			errs <- err
+			return
+		}
+		events <- ev
+	}()
+
+	if err := c.Set(key, "rover").Point(33.6, -115.6).Do(ctx); err != nil {
+		t.Fatalf("move in: %v", err)
+	}
+	ev := waitEvent(t, events, errs)
+	if ev.Distance <= 0 {
+		t.Errorf("event distance = %v, want > 0", ev.Distance)
 	}
 }
 
