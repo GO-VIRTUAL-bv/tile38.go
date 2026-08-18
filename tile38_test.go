@@ -962,3 +962,84 @@ func TestFenceEventDecodesFieldsAndMeta(t *testing.T) {
 		t.Errorf("meta = %v, want owner=ops", ev.Meta)
 	}
 }
+
+// Tile38 appends a third ordinate to a coordinate array only when it is
+// non-zero, so both lengths arrive in the same reply and a parse that stops at
+// lon drops whatever the caller stored there.
+func TestPointsDecodeZ(t *testing.T) {
+	const flat = "*2\r\n$4\r\n51.2\r\n$3\r\n4.4"
+	const withZ = "*3\r\n$4\r\n51.2\r\n$3\r\n4.4\r\n$5\r\n100.5"
+
+	t.Run("points", func(t *testing.T) {
+		addr := fakeServer(t, func(r *bufio.Reader, w net.Conn) {
+			_ = readCommand(t, r)
+			_, _ = io.WriteString(w, "*2\r\n:0\r\n*2\r\n"+
+				"*2\r\n$1\r\na\r\n"+withZ+"\r\n"+
+				"*2\r\n$1\r\nb\r\n"+flat+"\r\n")
+		})
+		c := New(addr)
+		defer c.Close()
+
+		res, err := c.Scan("fleet").Points(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := []NearbyResult{
+			{ID: "a", Lat: 51.2, Lon: 4.4, Z: 100.5},
+			{ID: "b", Lat: 51.2, Lon: 4.4},
+		}
+		if !reflect.DeepEqual(res, want) {
+			t.Errorf("points = %+v, want %+v", res, want)
+		}
+	})
+
+	// With DISTANCE the z sits inside the coordinate array, so it must not be
+	// confused with the trailing distance.
+	t.Run("points with distance and fields", func(t *testing.T) {
+		addr := fakeServer(t, func(r *bufio.Reader, w net.Conn) {
+			_ = readCommand(t, r)
+			_, _ = io.WriteString(w, "*2\r\n:0\r\n*1\r\n*4\r\n$1\r\na\r\n"+withZ+
+				"\r\n*2\r\n$5\r\nspeed\r\n$2\r\n42\r\n$3\r\n120\r\n")
+		})
+		c := New(addr)
+		defer c.Close()
+
+		res, err := c.Nearby("fleet").Point(1, 2).Radius(3).PointsWithDistance(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := []NearbyResultWithDistance{{
+			NearbyResult: NearbyResult{ID: "a", Lat: 51.2, Lon: 4.4, Z: 100.5, Fields: Fields{"speed": "42"}},
+			Distance:     120,
+		}}
+		if !reflect.DeepEqual(res, want) {
+			t.Errorf("points with distance = %+v, want %+v", res, want)
+		}
+	})
+
+	// GET POINT carries the same optional ordinate; Point drops it by contract,
+	// PointZ is the terminal that keeps it.
+	t.Run("get point", func(t *testing.T) {
+		addr, _ := fakeServerN(t, func(r *bufio.Reader, w net.Conn) {
+			for {
+				if _, err := resp.ReadReply(r); err != nil {
+					return
+				}
+				_, _ = io.WriteString(w, withZ+"\r\n")
+			}
+		})
+		c := New(addr)
+		defer c.Close()
+
+		lat, lon, z, err := c.Get("fleet", "truck1").PointZ(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if lat != 51.2 || lon != 4.4 || z != 100.5 {
+			t.Errorf("point z = %v,%v,%v; want 51.2,4.4,100.5", lat, lon, z)
+		}
+		if lat, lon, err = c.Get("fleet", "truck1").Point(t.Context()); err != nil || lat != 51.2 || lon != 4.4 {
+			t.Errorf("point = %v,%v,%v; want 51.2,4.4", lat, lon, err)
+		}
+	})
+}

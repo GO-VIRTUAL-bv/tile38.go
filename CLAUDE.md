@@ -206,6 +206,11 @@ Do not "correct" them back without re-testing.
   `[id, [lat, lon], [fields…]?]`. `parseFields` decodes it into the public
   `Fields` type; a parse path that stops at the geometry silently drops every
   field the caller asked the server for.
+- A coordinate array is `[lat, lon]` or `[lat, lon, z]`: Tile38 appends the third
+  ordinate only when it is non-zero (`extractZCoordinate`), on `POINTS` output
+  and on `GET key id POINT` alike, so both lengths turn up in one reply and a
+  zero z is indistinguishable from a two-dimensional point. `parseCoords` is the
+  one place that decodes it.
 - With `DISTANCE POINTS`, an item is `[id, [lat, lon], [fields…]?, dist]`. The
   fields array appears only when the object has non-zero fields, so distance is
   read from the **end** of the item, not a fixed index — and the fields are only

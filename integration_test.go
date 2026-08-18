@@ -378,6 +378,64 @@ func TestScan(t *testing.T) {
 
 // Object bounds come back lat-first while collection bounds come back
 // lon-first; both must land in BoundsResult as {lat, lon}.
+// A point can carry a third ordinate, which Tile38 stores and echoes back but
+// omits from the reply whenever it is zero — so a two-element and a
+// three-element coordinate array turn up in the same response.
+func TestPointZ(t *testing.T) {
+	c, key := newClient(t)
+	ctx := t.Context()
+
+	if err := c.Set(key, "flying").Object(
+		`{"type":"Point","coordinates":[-115.5,33.5,120.5]}`).Do(ctx); err != nil {
+		t.Fatalf("set 3d: %v", err)
+	}
+	if err := c.Set(key, "ground").Point(33.6, -115.6).Do(ctx); err != nil {
+		t.Fatalf("set 2d: %v", err)
+	}
+
+	lat, lon, z, err := c.Get(key, "flying").PointZ(ctx)
+	if err != nil {
+		t.Fatalf("get point z: %v", err)
+	}
+	if lat != 33.5 || lon != -115.5 || z != 120.5 {
+		t.Errorf("get point z = %v,%v,%v; want 33.5,-115.5,120.5", lat, lon, z)
+	}
+	if _, _, z, err = c.Get(key, "ground").PointZ(ctx); err != nil || z != 0 {
+		t.Errorf("get 2d point z = %v, %v; want 0", z, err)
+	}
+
+	pts, err := c.Scan(key).Points(ctx)
+	if err != nil {
+		t.Fatalf("scan points: %v", err)
+	}
+	byID := map[string]NearbyResult{}
+	for _, p := range pts {
+		byID[p.ID] = p
+	}
+	if byID["flying"].Z != 120.5 {
+		t.Errorf("scan points z = %v, want 120.5", byID["flying"].Z)
+	}
+	if byID["ground"].Z != 0 {
+		t.Errorf("scan points 2d z = %v, want 0", byID["ground"].Z)
+	}
+
+	// The z lives inside the coordinate array, so the trailing distance must not
+	// be read as one or vice versa.
+	withDist, err := c.Nearby(key).Point(33.5, -115.5).Radius(100000).PointsWithDistance(ctx)
+	if err != nil {
+		t.Fatalf("points with distance: %v", err)
+	}
+	if len(withDist) != 2 || withDist[0].ID != "flying" {
+		t.Fatalf("points with distance = %+v", withDist)
+	}
+	if withDist[0].Z != 120.5 || withDist[0].Distance != 0 {
+		t.Errorf("nearest = %+v, want z 120.5 and distance 0", withDist[0])
+	}
+	if withDist[1].Z != 0 || withDist[1].Distance <= 0 {
+		t.Errorf("second = %+v, want z 0 and a positive distance", withDist[1])
+	}
+}
+
 func TestBoundsCoordinateOrder(t *testing.T) {
 	c, key := newClient(t)
 	ctx := t.Context()

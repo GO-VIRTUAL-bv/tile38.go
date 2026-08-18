@@ -342,22 +342,20 @@ type GetCmd struct {
 }
 
 // Point executes: GET collection id POINT — returns the lat/lon of the object.
+// Use PointZ for an object stored with a third ordinate.
 func (cmd *GetCmd) Point(ctx context.Context) (lat, lon float64, err error) {
+	lat, lon, _, err = cmd.PointZ(ctx)
+	return lat, lon, err
+}
+
+// PointZ executes: GET collection id POINT — returns the lat/lon of the object
+// along with its third ordinate, which Tile38 appends only when it is non-zero.
+func (cmd *GetCmd) PointZ(ctx context.Context) (lat, lon, z float64, err error) {
 	val, err := cmd.c.do(ctx, append(cmd.args, "POINT")...)
 	if err != nil {
-		return 0, 0, fmt.Errorf("tile38: GET POINT: %w", err)
+		return 0, 0, 0, fmt.Errorf("tile38: GET POINT: %w", err)
 	}
-	outer, ok := val.([]any)
-	if !ok || len(outer) < 2 {
-		return 0, 0, fmt.Errorf("tile38: GET POINT: unexpected response shape: %T", val)
-	}
-	if lat, err = toFloat64(outer[0]); err != nil {
-		return 0, 0, fmt.Errorf("tile38: GET POINT lat: %w", err)
-	}
-	if lon, err = toFloat64(outer[1]); err != nil {
-		return 0, 0, fmt.Errorf("tile38: GET POINT lon: %w", err)
-	}
-	return lat, lon, nil
+	return parseCoords("GET POINT", val)
 }
 
 // Object executes: GET collection id — returns the raw GeoJSON string.

@@ -7,7 +7,8 @@ package tile38
 import "encoding/json"
 
 // Result types returned by the command builders. Coordinates are always
-// {lat, lon}, matching the order Tile38 takes them in.
+// {lat, lon}, matching the order Tile38 takes them in, with the optional third
+// z ordinate alongside them.
 
 // Fields are an object's Tile38 FIELDS, name → Tile38's own text encoding of the
 // value: the decimal form of a number, the verbatim JSON text of a JSON field.
@@ -41,9 +42,14 @@ func (f *Fields) UnmarshalJSON(data []byte) error {
 
 // NearbyResult holds a single result from a Nearby or Scan query.
 type NearbyResult struct {
-	ID     string
-	Lat    float64
-	Lon    float64
+	ID  string
+	Lat float64
+	Lon float64
+	// Z is the point's third ordinate — Tile38 stores whatever a caller put
+	// there, most often an altitude. It is zero both for a two-dimensional point
+	// and for a z of zero: Tile38 omits the ordinate entirely when it is zero,
+	// so the two are indistinguishable on the wire.
+	Z      float64
 	Fields Fields
 }
 
