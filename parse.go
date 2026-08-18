@@ -217,6 +217,16 @@ func parseObjects(prefix string, val any) ([]SearchObject, uint64, error) {
 		})
 }
 
+// parseStrings parses a Tile38 SEARCH response in its default output format,
+// where element 1 is the object's string value rather than its geometry.
+// Tile38 returns: [cursor, [[id, value, [field, val, …]?], ...]]
+func parseStrings(prefix string, val any) ([]StringObject, uint64, error) {
+	return parseStringItems(prefix+" Strings", val,
+		func(id, value string, fields Fields) StringObject {
+			return StringObject{ID: id, Value: value, Fields: fields}
+		})
+}
+
 // parseHashes parses a Tile38 HASHES output response.
 // Tile38 returns: [cursor, [[id, geohash, [field, val, …]?], ...]]
 func parseHashes(prefix string, val any) ([]HashResult, uint64, error) {

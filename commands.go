@@ -27,6 +27,12 @@ func (c *Client) FGet(collection, id, field string) *FGetCmd {
 	return &FGetCmd{c: c, args: []any{"FGET", collection, id, field}}
 }
 
+// FExists starts building a Tile38 FEXISTS command to test whether a field is
+// set on an object.
+func (c *Client) FExists(collection, id, field string) *FExistsCmd {
+	return &FExistsCmd{c: c, args: []any{"FEXISTS", collection, id, field}}
+}
+
 // Get starts building a Tile38 GET query for the given collection and object ID.
 func (c *Client) Get(collection, id string) *GetCmd {
 	return &GetCmd{c: c, args: []any{"GET", collection, id}}
@@ -40,6 +46,18 @@ func (c *Client) Nearby(collection string) *NearbyCmd {
 // Scan starts building a Tile38 SCAN query for the given collection.
 func (c *Client) Scan(collection string) *ScanCmd {
 	return &ScanCmd{c: c, args: []any{"SCAN", collection}}
+}
+
+// Search starts building a Tile38 SEARCH query, which matches on the string
+// values "SET … STRING" stores rather than on geometry.
+func (c *Client) Search(collection string) *SearchCmd {
+	return &SearchCmd{c: c, args: []any{"SEARCH", collection}}
+}
+
+// Test starts building a Tile38 TEST command comparing area against another,
+// given to Within or Intersects. It touches no stored object.
+func (c *Client) Test(area Area) *TestCmd {
+	return &TestCmd{c: c, area1: area}
 }
 
 // Within starts building a Tile38 WITHIN query for the given collection.

@@ -920,6 +920,151 @@ func (cmd *ScanCmd) A5Cells(ctx context.Context, level int) ([]A5Result, error) 
 	return searchA5Cells(ctx, cmd.c, "SCAN", cmd.opts, &cmd.cursorOut, cmd.execArgs("A5", strconv.Itoa(level)))
 }
 
+// SearchCmd builds a Tile38 SEARCH command, which matches on the string values
+// "SET … STRING" stores rather than on geometry. It takes no area and no fence.
+type SearchCmd struct {
+	c         *Client
+	args      []any // verb, key, and repeatable options
+	opts      searchOpts
+	cursorOut uint64 // cursor from the last executed terminal
+}
+
+// Limit caps the number of results. Zero means no limit.
+func (cmd *SearchCmd) Limit(n int) *SearchCmd {
+	cmd.opts.limit = &n
+	return cmd
+}
+
+// Cursor resumes a search from where a previous one stopped, matching Tile38's
+// CURSOR keyword. Pass the value NextCursor reported.
+func (cmd *SearchCmd) Cursor(n uint64) *SearchCmd {
+	cmd.opts.cursor = &n
+	return cmd
+}
+
+// NextCursor reports where to resume after the last executed terminal. It is
+// non-zero only when Tile38 stopped at the limit with more objects matching.
+func (cmd *SearchCmd) NextCursor() uint64 { return cmd.cursorOut }
+
+// Match filters results by string value (glob-style, e.g. "*hello*"), matching
+// Tile38's MATCH keyword. It accumulates: each call adds another pattern.
+func (cmd *SearchCmd) Match(pattern string) *SearchCmd {
+	cmd.args = append(cmd.args, "MATCH", pattern)
+	return cmd
+}
+
+// Asc returns results in ascending order, matching Tile38's ASC keyword. Asc and
+// Desc overwrite each other: Tile38 rejects a command carrying both.
+func (cmd *SearchCmd) Asc() *SearchCmd {
+	order := "ASC"
+	cmd.opts.order = &order
+	return cmd
+}
+
+// Desc returns results in descending order, matching Tile38's DESC keyword.
+func (cmd *SearchCmd) Desc() *SearchCmd {
+	order := "DESC"
+	cmd.opts.order = &order
+	return cmd
+}
+
+// Where sets an optional Tile38 field expression filter.
+func (cmd *SearchCmd) Where(expr string) *SearchCmd {
+	cmd.args = append(cmd.args, "WHERE", expr)
+	return cmd
+}
+
+// WhereIn keeps results whose field holds one of the given values, matching
+// Tile38's WHEREIN keyword. It accumulates: each call adds another filter.
+func (cmd *SearchCmd) WhereIn(field string, values ...any) *SearchCmd {
+	cmd.args = append(cmd.args, whereInTokens(field, values)...)
+	return cmd
+}
+
+// WhereEval keeps results for which the given Lua script returns true, matching
+// Tile38's WHEREEVAL keyword. It accumulates: each call adds another filter.
+func (cmd *SearchCmd) WhereEval(script string, args ...any) *SearchCmd {
+	cmd.args = append(cmd.args, countedTokens("WHEREEVAL", script, args)...)
+	return cmd
+}
+
+// WhereEvalSha is WhereEval against a script already loaded on the server,
+// matching Tile38's WHEREEVALSHA keyword.
+func (cmd *SearchCmd) WhereEvalSha(sha string, args ...any) *SearchCmd {
+	cmd.args = append(cmd.args, countedTokens("WHEREEVALSHA", sha, args)...)
+	return cmd
+}
+
+// NoFields drops field values from the reply, matching Tile38's NOFIELDS keyword.
+func (cmd *SearchCmd) NoFields() *SearchCmd {
+	cmd.opts.nofields = true
+	return cmd
+}
+
+func (cmd *SearchCmd) execArgs(format ...string) []any {
+	return buildSearch(cmd.args, cmd.opts, nil, format, nil)
+}
+
+// IDs executes: SEARCH collection [opts] IDS
+func (cmd *SearchCmd) IDs(ctx context.Context) ([]string, error) {
+	val, err := cmd.c.do(ctx, cmd.execArgs("IDS")...)
+	if err != nil {
+		return nil, fmt.Errorf("tile38: SEARCH IDs: %w", err)
+	}
+	res, cursor, err := parseScanIDs(val)
+	if err != nil {
+		return nil, err
+	}
+	cmd.cursorOut = cursor
+	return res, truncation(cmd.opts, cursor)
+}
+
+// Count executes: SEARCH collection [opts] COUNT
+func (cmd *SearchCmd) Count(ctx context.Context) (int, error) {
+	val, err := cmd.c.do(ctx, cmd.execArgs("COUNT")...)
+	if err != nil {
+		return 0, fmt.Errorf("tile38: SEARCH COUNT: %w", err)
+	}
+	return parseCount("SEARCH", val)
+}
+
+// Strings executes: SEARCH collection [opts] — the default output, which pairs
+// each id with the string value that matched. Tile38 has no keyword for it, so
+// the method is named for what it returns.
+func (cmd *SearchCmd) Strings(ctx context.Context) ([]StringObject, error) {
+	val, err := cmd.c.do(ctx, cmd.execArgs()...)
+	if err != nil {
+		return nil, fmt.Errorf("tile38: SEARCH: %w", err)
+	}
+	res, cursor, err := parseStrings("SEARCH", val)
+	if err != nil {
+		return nil, err
+	}
+	cmd.cursorOut = cursor
+	return res, truncation(cmd.opts, cursor)
+}
+
+// FExistsCmd builds a Tile38 FEXISTS command.
+type FExistsCmd struct {
+	c    *Client
+	args []any
+}
+
+// Do executes: FEXISTS collection id field — reports whether the field is set on
+// the object. Unlike FGet, this distinguishes a missing field from one holding
+// the zero value.
+func (cmd *FExistsCmd) Do(ctx context.Context) (bool, error) {
+	val, err := cmd.c.do(ctx, cmd.args...)
+	if err != nil {
+		return false, fmt.Errorf("tile38: FEXISTS: %w", err)
+	}
+	n, err := toInt64("FEXISTS", val)
+	if err != nil {
+		return false, err
+	}
+	return n == 1, nil
+}
+
 // WithinCmd builds a Tile38 WITHIN query. Methods may be chained in any order;
 // the parts are assembled into protocol order when the command runs.
 type WithinCmd struct {
