@@ -1,0 +1,35 @@
+version: 2
+updates:
+  # Go modules. Everything here is a test-only dependency — the library itself
+  # has none — so these PRs are gated by the integration job, not by whether
+  # consumers build them.
+  - package-ecosystem: "gomod"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+    open-pull-requests-limit: 10
+    labels:
+      - "dependencies"
+      - "go"
+    groups:
+      testcontainers:
+        patterns:
+          - "github.com/testcontainers/*"
+          - "github.com/docker/*"
+          - "github.com/moby/*"
+          - "github.com/containerd/*"
+          - "github.com/opencontainers/*"
+
+  # GitHub Actions
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "github-actions"

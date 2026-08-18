@@ -1,0 +1,49 @@
+name: Release
+
+# Pushing a semver tag publishes the release page. For a Go module the tag is
+# the release, so this only gates it on a green test run and writes the notes.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # release notes are generated from the commit history
+
+      - name: Setup Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Run unit tests
+        run: go test -race ./...
+
+      - name: Run integration tests against Tile38
+        run: go test -tags=integration -timeout=15m ./...
+
+      # A tag containing a hyphen is a pre-release under semver: v1.2.0-rc.1.
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if [[ "$TAG" == *-* ]]; then
+            prerelease=--prerelease
+          else
+            prerelease=""
+          fi
+          gh release create "$TAG" \
+            --title "$TAG" \
+            --generate-notes \
+            --verify-tag \
+            $prerelease

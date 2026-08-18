@@ -1,0 +1,88 @@
+name: Tile38 Upstream Check
+
+# Two things can move under this client, so both get watched:
+#
+#   1. a new upstream release — worth reviewing for commands this client should
+#      speak, and for whether A5 has finally shipped in a tag;
+#   2. the tile38/tile38:edge digest pinned in .version — the pin keeps
+#      CI reproducible, but a pin nobody bumps means never testing against new
+#      upstream code, so drift gets a nudge.
+#
+# The issue itself is the state: once one exists naming a tag or a digest, that
+# change has been triaged and no second issue is opened for it.
+on:
+  schedule:
+    - cron: "0 6 * * 1" # Mondays, 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Open an issue for a new upstream Tile38 release
+        run: |
+          set -euo pipefail
+          tag=$(gh release view --repo tidwall/tile38 --json tagName --jq .tagName)
+
+          # The search is fuzzy about dots in a version, so confirm the hit.
+          titles=$(gh issue list --state all --search "$tag in:title" --json title --jq '.[].title')
+          if grep -qF "$tag" <<<"$titles"; then
+            echo "Tile38 $tag already has an issue."
+            exit 0
+          fi
+
+          gh issue create \
+            --title "Tile38 $tag released — review client support" \
+            --body "Upstream released [Tile38 $tag](https://github.com/tidwall/tile38/releases/tag/$tag).
+
+          Check the release notes for changes this client needs to follow:
+
+          - new commands or option tokens (\`internal/server/token.go\` for duplicate-argument guards)
+          - changed reply shapes (\`parse.go\`)
+          - changed search grammar or output ordering (\`builders.go\`, \`intersects.go\`)
+          - whether A5 shipped in this tag — if so, \`.version\` can move off \`edge\` onto a release
+
+          Close this issue once the release has been reviewed, whether or not it needed a change."
+
+      - name: Open an issue when the pinned edge image has moved
+        run: |
+          set -euo pipefail
+          pinned=$(cat .version)
+          current=$(docker buildx imagetools inspect tile38/tile38:edge --format '{{.Manifest.Digest}}')
+
+          if [[ "$pinned" == *"$current" ]]; then
+            echo "Pin is current: $pinned"
+            exit 0
+          fi
+
+          short=${current#sha256:}
+          short=${short:0:12}
+          titles=$(gh issue list --state all --search "$short in:title" --json title --jq '.[].title')
+          if grep -qF "$short" <<<"$titles"; then
+            echo "Edge digest $short already has an issue."
+            exit 0
+          fi
+
+          gh issue create \
+            --title "Tile38 edge moved to $short — re-verify and bump the pin" \
+            --body "\`.version\` pins:
+
+              $pinned
+
+          but \`tile38/tile38:edge\` is now \`$current\`.
+
+          Run \`make test-integration\` against the new digest, then update
+          \`.version\`. If it fails, the upstream change is a real break in
+          something this client speaks and the failure is the report."
