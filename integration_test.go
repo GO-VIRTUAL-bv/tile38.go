@@ -279,6 +279,14 @@ func TestSearchOutputFormats(t *testing.T) {
 	if objs[0].Fields["speed"] != "10" {
 		t.Errorf("nearby object fields = %v, want speed=10", objs[0].Fields)
 	}
+	// POINTS carries the same fields array — on its own at the end, and before
+	// the distance when DISTANCE is asked for.
+	if pts[0].Fields["speed"] != "10" {
+		t.Errorf("nearby points fields = %v, want speed=10", pts[0].Fields)
+	}
+	if withDist[0].Fields["speed"] != "10" {
+		t.Errorf("nearby points-with-distance fields = %v, want speed=10", withDist[0].Fields)
+	}
 
 	if n, err = c.Nearby(key).Limit(1).Point(33.5, -115.5).Radius(5000).Count(ctx); err != nil || n != 1 {
 		t.Errorf("nearby limit 1 count = %d, %v; want 1, nil", n, err)
@@ -653,7 +661,8 @@ func TestLiveFence(t *testing.T) {
 		}
 	}()
 
-	if err := c.Set(key, "rover").Point(33.5, -115.5).Do(ctx); err != nil {
+	if err := c.Set(key, "rover").Field("speed", 42).Field("driver", "bob").
+		Point(33.5, -115.5).Do(ctx); err != nil {
 		t.Fatalf("move in: %v", err)
 	}
 	enter := waitEvent(t, events, errs)
@@ -665,6 +674,11 @@ func TestLiveFence(t *testing.T) {
 	}
 	if len(enter.Object) == 0 {
 		t.Error("first event carried no object geojson")
+	}
+	// The notification carries the object's fields as JSON, so a consumer never
+	// has to go back to the server for the state that triggered the event.
+	if enter.Fields["speed"] != "42" || enter.Fields["driver"] != "bob" {
+		t.Errorf("first event fields = %v, want speed=42 driver=bob", enter.Fields)
 	}
 
 	if err := c.Set(key, "rover").Point(40, -100).Do(ctx); err != nil {

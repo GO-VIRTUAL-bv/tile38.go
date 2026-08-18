@@ -32,19 +32,21 @@ func searchReply(prefix string, val any) (uint64, []any, error) {
 }
 
 // parseNearbyPoints parses the RESP response from NEARBY ... POINTS.
-// Tile38 returns: [cursor, [[id, [lat, lon]], [id, [lat, lon]], ...]]
+// Tile38 returns: [cursor, [[id, [lat, lon], [field, val, …]?], ...]]
 func parseNearbyPoints(val any) ([]NearbyResult, uint64, error) {
 	return parsePoints("NearbyPoints", val)
 }
 
 // parseScanPoints parses the RESP response from SCAN ... POINTS.
-// Tile38 returns: [cursor, [[id, [lat, lon]], ...]]
+// Tile38 returns: [cursor, [[id, [lat, lon], [field, val, …]?], ...]]
 func parseScanPoints(val any) ([]NearbyResult, uint64, error) {
 	return parsePoints("ScanPoints", val)
 }
 
-// parsePoints is the shared implementation for both NEARBY and SCAN POINTS responses.
-// Both commands return [cursor, [[id, [lat, lon]], ...]] with identical structure.
+// parsePoints is the shared implementation for both NEARBY and SCAN POINTS
+// responses. Both return [cursor, [[id, [lat, lon], [field, val, …]?], ...]] —
+// the fields array is present only when the object has non-zero fields, exactly
+// as it is on the OBJECTS output.
 func parsePoints(prefix string, val any) ([]NearbyResult, uint64, error) {
 	cursor, inner, err := searchReply(prefix, val)
 	if err != nil {
@@ -73,7 +75,11 @@ func parsePoints(prefix string, val any) ([]NearbyResult, uint64, error) {
 		if err != nil {
 			return nil, 0, fmt.Errorf("tile38: %s: lon: %w", prefix, err)
 		}
-		results = append(results, NearbyResult{ID: id, Lat: lat, Lon: lon})
+		res := NearbyResult{ID: id, Lat: lat, Lon: lon}
+		if len(pair) > 2 {
+			res.Fields = parseFields(pair[2])
+		}
+		results = append(results, res)
 	}
 	return results, cursor, nil
 }
@@ -113,10 +119,14 @@ func parsePointsWithDistance(val any) ([]NearbyResultWithDistance, uint64, error
 		if err != nil {
 			return nil, 0, fmt.Errorf("tile38: PointsWithDistance: dist: %w", err)
 		}
-		results = append(results, NearbyResultWithDistance{
+		res := NearbyResultWithDistance{
 			NearbyResult: NearbyResult{ID: id, Lat: lat, Lon: lon},
 			Distance:     dist,
-		})
+		}
+		if len(pair) > 3 {
+			res.Fields = parseFields(pair[2])
+		}
+		results = append(results, res)
 	}
 	return results, cursor, nil
 }
@@ -161,7 +171,7 @@ func parseCount(prefix string, val any) (int, error) {
 }
 
 // parseObjects parses a Tile38 OBJECTS output response.
-// Tile38 returns: [cursor, [[id, geojson], [id, geojson], ...]]
+// Tile38 returns: [cursor, [[id, geojson, [field, val, …]?], ...]]
 func parseObjects(prefix string, val any) ([]SearchObject, uint64, error) {
 	cursor, inner, err := searchReply(prefix+" Objects", val)
 	if err != nil {
@@ -197,12 +207,12 @@ func parseObjects(prefix string, val any) ([]SearchObject, uint64, error) {
 // A shape it does not recognise yields no fields rather than an error. Fields
 // decorate a result; they do not define it, and failing the whole search over an
 // unexpected field encoding would lose the geometry too.
-func parseFields(v any) map[string]string {
+func parseFields(v any) Fields {
 	arr, ok := v.([]any)
 	if !ok || len(arr) == 0 || len(arr)%2 != 0 {
 		return nil
 	}
-	out := make(map[string]string, len(arr)/2)
+	out := make(Fields, len(arr)/2)
 	for i := 0; i+1 < len(arr); i += 2 {
 		name, ok := arr[i].(string)
 		if !ok {
