@@ -55,6 +55,8 @@ commands.go      command entry points (c.Set, c.Nearby, …)
 types.go         result types
 builders.go      write, read, search, hook builders + protocol token types
 intersects.go    INTERSECTS builder
+geometry.go      Area values + the TEST builder
+server.go        STATS, CONFIG, GC, HEALTHZ, READONLY, FOLLOW, TIMEOUT
 channel.go       SETCHAN / channel builders
 json.go          JSET / JGET / JDEL builders
 management.go    DROP, RENAME, TTL, KEYS, BOUNDS, … builders
@@ -227,6 +229,22 @@ Do not "correct" them back without re-testing.
   `[name, key, [endpoint…], [command token…], [meta…]]` — not flat strings, and
   element 1 is the collection key, not the endpoint.
 - Tile38 has **no `DBSIZE` command**; `DBSize` reads `num_objects` out of `SERVER`.
+- `BUFFER` **panics** the server on `NEARBY` — `cmdNearby` type-asserts the area
+  to `*geojson.Circle` and the buffer turns it into a `GeometryCollection`
+  (`search.go:569`). That is why `Buffer` exists on `WithinCmd` and
+  `IntersectsCmd` and deliberately not on `NearbyCmd`.
+- `ASC`/`DESC` are accepted only by `SCAN` and `SEARCH`; the spatial verbs answer
+  "DESC is not allowed for NEARBY". They are mutually exclusive and each is
+  duplicate-guarded, so they share one single-use `order` slot.
+- `SECTOR`, `HASH` and `QUADKEY` are areas `WITHIN`, `INTERSECTS` and the hooks
+  take and `NEARBY` rejects. `TEST` takes them too — but not `A5`, which upstream
+  added after the pinned digest.
+- `GET … WITHFIELDS` wraps the reply in `[value, [name, val …]]`, and drops to a
+  **single-element** `[value]` when the object has no non-zero fields.
+- `TEST … CLIP …` answers `[result, geojson]` rather than the bare integer plain
+  `TEST` returns, which is why `Clip` is its own terminal.
+- `STATS` answers with one element per key asked for and a **null** element for a
+  collection that does not exist, rather than an error.
 - Tile38 accepts every coordinate a `float64` can hold, including out-of-range
   values and `NaN`. Only non-numeric text is rejected, which is why the
   pipeline error path can only be tested against a scripted reply.

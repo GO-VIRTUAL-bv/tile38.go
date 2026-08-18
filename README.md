@@ -77,12 +77,15 @@ near, err := c.Nearby("fleet").Point(33.5, -115.5).Radius(5000).PointsWithDistan
 trucks, err := c.Scan("fleet").Match("truck:*").IDs(ctx)
 ```
 
-Every search verb offers the four output formats — `IDs`, `Points`, `Count`,
-`Objects` — and every search area Tile38 supports: `Bounds`, `Circle`,
-`Object` (GeoJSON), `Get` (an object already stored), `Tile`, and `A5`.
+Every search verb offers the output formats `IDs`, `Points`, `Count`,
+`Objects`, `Rects` (BOUNDS), `Hashes`, and `A5Cells`, and every search area
+Tile38 supports: `Bounds`, `Circle`, `Sector`, `Object` (GeoJSON), `Get` (an
+object already stored), `Hash`, `QuadKey`, `Tile`, and `A5`. `Nearby` takes
+`Point` + `Radius` instead of an area, and `Scan` and `Search` take none.
 
-Filters are `Where`, `WhereIn`, and `Match`, which accumulate; `Limit`,
-`Cursor`, `Sparse`, `NoFields`, and `Clip` are single-use and overwrite.
+Filters are `Where`, `WhereIn`, `WhereEval`, `WhereEvalSha`, and `Match`, which
+accumulate; `Limit`, `Cursor`, `Sparse`, `NoFields`, `Clip`, and `Asc`/`Desc`
+are single-use and overwrite.
 
 `Points` and `Objects` results carry the object's `Fields` beside its geometry,
 so reading a collection's state is one round trip rather than an `FGet` per
@@ -96,7 +99,29 @@ for _, p := range pts {
 
 Values are Tile38's own text encoding — the decimal form of a number, the
 verbatim JSON text of a JSON field — and are absent for an object whose fields
-are all zero or when the query used `NoFields`.
+are all zero or when the query used `NoFields`. One object's fields come back
+with its geometry through `Get(...).WithFields()`:
+
+```go
+g := c.Get("fleet", "truck1").WithFields()
+lat, lon, err := g.Point(ctx)
+speed := g.Fields()["speed"]
+```
+
+### Other commands
+
+`Search` matches the string values `Set(...).String(...)` stores, rather than
+geometry. `Test` compares two areas without touching stored objects:
+
+```go
+ok, err := c.Test(tile38.AreaGet("fleet", "truck1")).
+    Within(tile38.AreaBounds(tile38.GlobalBounds())).Do(ctx)
+```
+
+Field, collection and server commands: `FGet`, `FSet`, `FExists`, `JGet`/`JSet`/
+`JDel`, `Keys`, `Bounds`, `Stats`, `DBSize`, `Drop`, `PDel`, `Rename`, `Expire`,
+`Persist`, `TTL`, `Exists`, `FlushDB`, `ConfigGet`/`ConfigSet`/`ConfigRewrite`,
+`GC`, `Healthz`, `AOFShrink`, `ReadOnly`, `Follow`/`FollowNone`, and `Timeout`.
 
 ### Result limits
 
