@@ -1469,3 +1469,77 @@ func TestSearchStrings(t *testing.T) {
 		t.Errorf("strings = %+v, want %+v", res, want)
 	}
 }
+
+// The server commands are argument-shape only: each fixes its tokens at the
+// entry point, and several spell their arguments in ways that are easy to get
+// wrong (READONLY yes/no, "FOLLOW no one", CONFIG's two-word verb).
+func TestServerCommandTokens(t *testing.T) {
+	tests := map[string]struct {
+		run   func(*Client) error
+		want  []string
+		reply string
+	}{
+		"readonly on":  {run: func(c *Client) error { return c.ReadOnly(true).Do(t.Context()) }, want: []string{"READONLY", "yes"}},
+		"readonly off": {run: func(c *Client) error { return c.ReadOnly(false).Do(t.Context()) }, want: []string{"READONLY", "no"}},
+		"follow":       {run: func(c *Client) error { return c.Follow("leader", 9851).Do(t.Context()) }, want: []string{"FOLLOW", "leader", "9851"}},
+		"follow none":  {run: func(c *Client) error { return c.FollowNone().Do(t.Context()) }, want: []string{"FOLLOW", "no", "one"}},
+		"config set":   {run: func(c *Client) error { return c.ConfigSet("keepalive", "300").Do(t.Context()) }, want: []string{"CONFIG", "SET", "keepalive", "300"}},
+		"gc":           {run: func(c *Client) error { return c.GC().Do(t.Context()) }, want: []string{"GC"}},
+		"healthz":      {run: func(c *Client) error { return c.Healthz().Do(t.Context()) }, want: []string{"HEALTHZ"}},
+		"aofshrink":    {run: func(c *Client) error { return c.AOFShrink().Do(t.Context()) }, want: []string{"AOFSHRINK"}},
+		"timeout wraps the command": {
+			run: func(c *Client) error {
+				_, err := c.Timeout(t.Context(), 2.5, "SCAN", "fleet", "COUNT")
+				return err
+			},
+			want: []string{"TIMEOUT", "2.5", "SCAN", "fleet", "COUNT"},
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			got := make(chan []string, 1)
+			addr := fakeServer(t, func(r *bufio.Reader, w net.Conn) {
+				got <- readCommand(t, r)
+				_, _ = io.WriteString(w, "+OK\r\n")
+			})
+			c := New(addr)
+			defer c.Close()
+
+			if err := tc.run(c); err != nil {
+				t.Fatal(err)
+			}
+			if cmd := <-got; !reflect.DeepEqual(cmd, tc.want) {
+				t.Errorf("command = %q, want %q", cmd, tc.want)
+			}
+		})
+	}
+}
+
+// A missing collection comes back as a null element, which has to read as an
+// absent collection rather than failing the whole call.
+func TestStatsDecoding(t *testing.T) {
+	present := wire("*8",
+		"$14", "in_memory_size", "$2", "46",
+		"$11", "num_objects", "$1", "2",
+		"$10", "num_points", "$1", "2",
+		"$11", "num_strings", "$1", "0")
+	addr := fakeServer(t, func(r *bufio.Reader, w net.Conn) {
+		_ = readCommand(t, r)
+		_, _ = io.WriteString(w, "*2\r\n"+present+"$-1\r\n")
+	})
+	c := New(addr)
+	defer c.Close()
+
+	stats, err := c.Stats("fleet", "gone").Do(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []CollectionStats{
+		{Key: "fleet", Exists: true, InMemorySize: 46, NumObjects: 2, NumPoints: 2},
+		{Key: "gone"},
+	}
+	if !reflect.DeepEqual(stats, want) {
+		t.Errorf("stats = %+v, want %+v", stats, want)
+	}
+}

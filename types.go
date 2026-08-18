@@ -102,6 +102,18 @@ type BoundsResult struct {
 	NE [2]float64 // {lat, lon}
 }
 
+// CollectionStats holds the STATS counters for one collection. Exists is false
+// when the collection is not there: Tile38 answers with a null element for a
+// missing key rather than an error.
+type CollectionStats struct {
+	Key          string
+	Exists       bool
+	InMemorySize int64
+	NumObjects   int64
+	NumPoints    int64
+	NumStrings   int64
+}
+
 // HookInfo describes a registered hook (HOOKS) or pub/sub channel (CHANS).
 type HookInfo struct {
 	Name      string            // hook or channel name
