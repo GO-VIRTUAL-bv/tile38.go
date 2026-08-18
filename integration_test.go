@@ -310,6 +310,30 @@ func TestSearchOutputFormats(t *testing.T) {
 		t.Errorf("nearby points-with-distance fields = %v, want speed=10", withDist[0].Fields)
 	}
 
+	// BOUNDS, HASHES and A5 are output formats the server supports on every
+	// search verb; BOUNDS and HASHES carry fields, A5 deliberately does not.
+	rects, err := c.Nearby(key).Point(33.5, -115.5).Radius(5000).Rects(ctx)
+	if err != nil {
+		t.Fatalf("nearby rects: %v", err)
+	}
+	if len(rects) != 2 || rects[0].Bounds.SW[0] == 0 || rects[0].Fields["speed"] != "10" {
+		t.Errorf("nearby rects = %+v", rects)
+	}
+	hashes, err := c.Within(key).Bounds(GlobalBounds()).Hashes(ctx, 6)
+	if err != nil {
+		t.Fatalf("within hashes: %v", err)
+	}
+	if len(hashes) != 3 || len(hashes[0].Hash) != 6 || hashes[0].Fields["speed"] != "10" {
+		t.Errorf("within hashes = %+v", hashes)
+	}
+	cells, err := c.Scan(key).A5Cells(ctx, 8)
+	if err != nil {
+		t.Fatalf("scan a5 cells: %v", err)
+	}
+	if len(cells) != 3 || cells[0].Cell == "" {
+		t.Errorf("scan a5 cells = %+v", cells)
+	}
+
 	if n, err = c.Nearby(key).Limit(1).Point(33.5, -115.5).Radius(5000).Count(ctx); err != nil || n != 1 {
 		t.Errorf("nearby limit 1 count = %d, %v; want 1, nil", n, err)
 	}

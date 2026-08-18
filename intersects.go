@@ -7,6 +7,7 @@ package tile38
 import (
 	"context"
 	"fmt"
+	"strconv"
 )
 
 // IntersectsCmd builds a Tile38 INTERSECTS query.
@@ -188,6 +189,26 @@ func (cmd *IntersectsCmd) Objects(ctx context.Context) ([]SearchObject, error) {
 	}
 	cmd.cursorOut = cursor
 	return res, truncation(cmd.opts, cursor)
+}
+
+// Rects executes: INTERSECTS collection [opts] BOUNDS <area>
+// Each result is the bounding box of a matching object, lat first.
+func (cmd *IntersectsCmd) Rects(ctx context.Context) ([]RectResult, error) {
+	return searchRects(ctx, cmd.c, "INTERSECTS", cmd.opts, &cmd.cursorOut, cmd.execArgs("BOUNDS"))
+}
+
+// Hashes executes: INTERSECTS collection [opts] HASHES precision <area>
+// Each result is the geohash of a matching object's centre.
+func (cmd *IntersectsCmd) Hashes(ctx context.Context, precision int) ([]HashResult, error) {
+	return searchHashes(ctx, cmd.c, "INTERSECTS", cmd.opts, &cmd.cursorOut, cmd.execArgs("HASHES", strconv.Itoa(precision)))
+}
+
+// A5Cells executes: INTERSECTS collection [opts] A5 level <area>
+// Each result is the A5 cell a matching object's centre falls in. Named for the
+// output rather than the keyword because A5 is already the search-area method on
+// the builders that take one. Requires a server built from upstream master.
+func (cmd *IntersectsCmd) A5Cells(ctx context.Context, level int) ([]A5Result, error) {
+	return searchA5Cells(ctx, cmd.c, "INTERSECTS", cmd.opts, &cmd.cursorOut, cmd.execArgs("A5", strconv.Itoa(level)))
 }
 
 // Fence opens a live geofence: INTERSECTS collection [opts] FENCE [DETECT …] area.

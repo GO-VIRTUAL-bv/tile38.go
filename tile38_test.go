@@ -1116,3 +1116,130 @@ func TestGetWithFields(t *testing.T) {
 		}
 	})
 }
+
+// BOUNDS, HASHES and A5 are output formats, so they sit between the options and
+// the search area — a chain that appended them would put the geometry in the
+// wrong slot and malform the command.
+func TestOutputFormatTokenOrder(t *testing.T) {
+	tests := map[string]struct {
+		run   func(*Client) error
+		want  []string
+		reply string
+	}{
+		"bounds": {
+			run: func(c *Client) error {
+				_, err := c.Nearby("fleet").Limit(5).Point(33.5, -115.5).Radius(100).Rects(t.Context())
+				return err
+			},
+			want: []string{"NEARBY", "fleet", "LIMIT", "5", "BOUNDS", "POINT", "33.5", "-115.5", "100"},
+		},
+		"hashes": {
+			run: func(c *Client) error {
+				_, err := c.Within("fleet").Bounds(GlobalBounds()).Hashes(t.Context(), 6)
+				return err
+			},
+			want: []string{"WITHIN", "fleet", "HASHES", "6", "BOUNDS", "-90", "-180", "90", "180"},
+		},
+		"a5": {
+			run: func(c *Client) error {
+				_, err := c.Intersects("fleet").Circle(1, 2, 3).A5Cells(t.Context(), 8)
+				return err
+			},
+			want: []string{"INTERSECTS", "fleet", "A5", "8", "CIRCLE", "1", "2", "3"},
+		},
+		"scan bounds": {
+			run: func(c *Client) error {
+				_, err := c.Scan("fleet").Match("truck:*").Rects(t.Context())
+				return err
+			},
+			want: []string{"SCAN", "fleet", "MATCH", "truck:*", "BOUNDS"},
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			got := make(chan []string, 1)
+			addr := fakeServer(t, func(r *bufio.Reader, w net.Conn) {
+				got <- readCommand(t, r)
+				_, _ = io.WriteString(w, wire("*2", ":0", "*0"))
+			})
+			c := New(addr)
+			defer c.Close()
+
+			if err := tc.run(c); err != nil {
+				t.Fatal(err)
+			}
+			if cmd := <-got; !reflect.DeepEqual(cmd, tc.want) {
+				t.Errorf("command = %q,\n           want %q", cmd, tc.want)
+			}
+		})
+	}
+}
+
+// BOUNDS items nest a corner pair inside the item and carry fields after it;
+// HASHES and A5 are flat. A5 is the one output Tile38 attaches no fields to.
+func TestOutputFormatDecoding(t *testing.T) {
+	t.Run("rects", func(t *testing.T) {
+		reply := wire("*2", ":0", "*1",
+			"*3", "$1", "a",
+			"*2", "*2", "$4", "51.1", "$3", "4.1", "*2", "$4", "51.3", "$3", "4.3",
+			"*2", "$5", "speed", "$2", "42")
+		addr := fakeServer(t, func(r *bufio.Reader, w net.Conn) {
+			_ = readCommand(t, r)
+			_, _ = io.WriteString(w, reply)
+		})
+		c := New(addr)
+		defer c.Close()
+
+		res, err := c.Scan("fleet").Rects(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := []RectResult{{
+			ID:     "a",
+			Bounds: BoundsResult{SW: [2]float64{51.1, 4.1}, NE: [2]float64{51.3, 4.3}},
+			Fields: Fields{"speed": "42"},
+		}}
+		if !reflect.DeepEqual(res, want) {
+			t.Errorf("rects = %+v, want %+v", res, want)
+		}
+	})
+
+	t.Run("hashes", func(t *testing.T) {
+		reply := wire("*2", ":0", "*1", "*3", "$1", "a", "$6", "9mvyed", "*2", "$5", "speed", "$2", "42")
+		addr := fakeServer(t, func(r *bufio.Reader, w net.Conn) {
+			_ = readCommand(t, r)
+			_, _ = io.WriteString(w, reply)
+		})
+		c := New(addr)
+		defer c.Close()
+
+		res, err := c.Scan("fleet").Hashes(t.Context(), 6)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := []HashResult{{ID: "a", Hash: "9mvyed", Fields: Fields{"speed": "42"}}}
+		if !reflect.DeepEqual(res, want) {
+			t.Errorf("hashes = %+v, want %+v", res, want)
+		}
+	})
+
+	t.Run("a5 cells", func(t *testing.T) {
+		reply := wire("*2", ":0", "*1", "*2", "$1", "a", "$16", "1970980000000000")
+		addr := fakeServer(t, func(r *bufio.Reader, w net.Conn) {
+			_ = readCommand(t, r)
+			_, _ = io.WriteString(w, reply)
+		})
+		c := New(addr)
+		defer c.Close()
+
+		res, err := c.Scan("fleet").A5Cells(t.Context(), 8)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := []A5Result{{ID: "a", Cell: "1970980000000000"}}
+		if !reflect.DeepEqual(res, want) {
+			t.Errorf("a5 cells = %+v, want %+v", res, want)
+		}
+	})
+}

@@ -7,6 +7,7 @@ package tile38
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -144,6 +145,53 @@ func buildSearch(args []any, opts searchOpts, fence []any, format []string, geom
 		out = append(out, f)
 	}
 	return append(out, geom...)
+}
+
+// The BOUNDS, HASHES and A5 output formats decode the same way for every search
+// verb, so each gets one runner rather than a copy per builder. cursorOut is the
+// builder's own cursor field, recorded for paging exactly as the older terminals
+// do it.
+
+// searchRects runs a search with the BOUNDS output format.
+func searchRects(ctx context.Context, c *Client, verb string, opts searchOpts, cursorOut *uint64, args []any) ([]RectResult, error) {
+	val, err := c.do(ctx, args...)
+	if err != nil {
+		return nil, fmt.Errorf("tile38: %s BOUNDS: %w", verb, err)
+	}
+	res, cursor, err := parseRects(verb, val)
+	if err != nil {
+		return nil, err
+	}
+	*cursorOut = cursor
+	return res, truncation(opts, cursor)
+}
+
+// searchHashes runs a search with the HASHES output format.
+func searchHashes(ctx context.Context, c *Client, verb string, opts searchOpts, cursorOut *uint64, args []any) ([]HashResult, error) {
+	val, err := c.do(ctx, args...)
+	if err != nil {
+		return nil, fmt.Errorf("tile38: %s HASHES: %w", verb, err)
+	}
+	res, cursor, err := parseHashes(verb, val)
+	if err != nil {
+		return nil, err
+	}
+	*cursorOut = cursor
+	return res, truncation(opts, cursor)
+}
+
+// searchA5Cells runs a search with the A5 output format.
+func searchA5Cells(ctx context.Context, c *Client, verb string, opts searchOpts, cursorOut *uint64, args []any) ([]A5Result, error) {
+	val, err := c.do(ctx, args...)
+	if err != nil {
+		return nil, fmt.Errorf("tile38: %s A5: %w", verb, err)
+	}
+	res, cursor, err := parseA5Cells(verb, val)
+	if err != nil {
+		return nil, err
+	}
+	*cursorOut = cursor
+	return res, truncation(opts, cursor)
 }
 
 // pointGeometry appends the trailing metres of Tile38's "POINT lat lon meters",
@@ -640,6 +688,26 @@ func (cmd *NearbyCmd) Objects(ctx context.Context) ([]SearchObject, error) {
 	return res, truncation(cmd.opts, cursor)
 }
 
+// Rects executes: NEARBY collection [opts] BOUNDS POINT lat lon radius
+// Each result is the bounding box of a matching object, lat first.
+func (cmd *NearbyCmd) Rects(ctx context.Context) ([]RectResult, error) {
+	return searchRects(ctx, cmd.c, "NEARBY", cmd.opts, &cmd.cursorOut, cmd.execArgs("BOUNDS"))
+}
+
+// Hashes executes: NEARBY collection [opts] HASHES precision POINT lat lon radius
+// Each result is the geohash of a matching object's centre.
+func (cmd *NearbyCmd) Hashes(ctx context.Context, precision int) ([]HashResult, error) {
+	return searchHashes(ctx, cmd.c, "NEARBY", cmd.opts, &cmd.cursorOut, cmd.execArgs("HASHES", strconv.Itoa(precision)))
+}
+
+// A5Cells executes: NEARBY collection [opts] A5 level POINT lat lon radius
+// Each result is the A5 cell a matching object's centre falls in. Named for the
+// output rather than the keyword because A5 is already the search-area method on
+// the builders that take one. Requires a server built from upstream master.
+func (cmd *NearbyCmd) A5Cells(ctx context.Context, level int) ([]A5Result, error) {
+	return searchA5Cells(ctx, cmd.c, "NEARBY", cmd.opts, &cmd.cursorOut, cmd.execArgs("A5", strconv.Itoa(level)))
+}
+
 // Fence opens a live geofence: NEARBY collection [opts] FENCE [DETECT …] POINT lat lon radius.
 // The returned Stream holds a dedicated connection and delivers events until it
 // is closed or ctx is cancelled.
@@ -757,6 +825,26 @@ func (cmd *ScanCmd) Objects(ctx context.Context) ([]SearchObject, error) {
 	}
 	cmd.cursorOut = cursor
 	return res, truncation(cmd.opts, cursor)
+}
+
+// Rects executes: SCAN collection [opts] BOUNDS
+// Each result is the bounding box of a matching object, lat first.
+func (cmd *ScanCmd) Rects(ctx context.Context) ([]RectResult, error) {
+	return searchRects(ctx, cmd.c, "SCAN", cmd.opts, &cmd.cursorOut, cmd.execArgs("BOUNDS"))
+}
+
+// Hashes executes: SCAN collection [opts] HASHES precision
+// Each result is the geohash of a matching object's centre.
+func (cmd *ScanCmd) Hashes(ctx context.Context, precision int) ([]HashResult, error) {
+	return searchHashes(ctx, cmd.c, "SCAN", cmd.opts, &cmd.cursorOut, cmd.execArgs("HASHES", strconv.Itoa(precision)))
+}
+
+// A5Cells executes: SCAN collection [opts] A5 level
+// Each result is the A5 cell a matching object's centre falls in. Named for the
+// output rather than the keyword because A5 is already the search-area method on
+// the builders that take one. Requires a server built from upstream master.
+func (cmd *ScanCmd) A5Cells(ctx context.Context, level int) ([]A5Result, error) {
+	return searchA5Cells(ctx, cmd.c, "SCAN", cmd.opts, &cmd.cursorOut, cmd.execArgs("A5", strconv.Itoa(level)))
 }
 
 // WithinCmd builds a Tile38 WITHIN query. Methods may be chained in any order;
@@ -935,6 +1023,26 @@ func (cmd *WithinCmd) Objects(ctx context.Context) ([]SearchObject, error) {
 	}
 	cmd.cursorOut = cursor
 	return res, truncation(cmd.opts, cursor)
+}
+
+// Rects executes: WITHIN collection [opts] BOUNDS <area>
+// Each result is the bounding box of a matching object, lat first.
+func (cmd *WithinCmd) Rects(ctx context.Context) ([]RectResult, error) {
+	return searchRects(ctx, cmd.c, "WITHIN", cmd.opts, &cmd.cursorOut, cmd.execArgs("BOUNDS"))
+}
+
+// Hashes executes: WITHIN collection [opts] HASHES precision <area>
+// Each result is the geohash of a matching object's centre.
+func (cmd *WithinCmd) Hashes(ctx context.Context, precision int) ([]HashResult, error) {
+	return searchHashes(ctx, cmd.c, "WITHIN", cmd.opts, &cmd.cursorOut, cmd.execArgs("HASHES", strconv.Itoa(precision)))
+}
+
+// A5Cells executes: WITHIN collection [opts] A5 level <area>
+// Each result is the A5 cell a matching object's centre falls in. Named for the
+// output rather than the keyword because A5 is already the search-area method on
+// the builders that take one. Requires a server built from upstream master.
+func (cmd *WithinCmd) A5Cells(ctx context.Context, level int) ([]A5Result, error) {
+	return searchA5Cells(ctx, cmd.c, "WITHIN", cmd.opts, &cmd.cursorOut, cmd.execArgs("A5", strconv.Itoa(level)))
 }
 
 // Fence opens a live geofence: WITHIN collection [opts] FENCE [DETECT …] area.
