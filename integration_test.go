@@ -870,6 +870,20 @@ func TestHooks(t *testing.T) {
 		t.Errorf("hook endpoints = %v", found.Endpoints)
 	}
 
+	// NEARBY takes a POINT area and rejects CIRCLE, so this is the only shape a
+	// non-roaming NEARBY hook can take.
+	nearbyHook := key + "-hook-nearby"
+	t.Cleanup(func() { _ = c.DelHook(nearbyHook).Do(context.Background()) })
+	if err := c.SetHook(nearbyHook).Endpoint("http://127.0.0.1:9999", "events").
+		Nearby(key).Point(33.5, -115.5).Radius(5000).Do(ctx); err != nil {
+		t.Fatalf("sethook nearby: %v", err)
+	}
+	nearbyChan := key + "-chan-nearby"
+	t.Cleanup(func() { _ = c.DelChan(nearbyChan).Do(context.Background()) })
+	if err := c.SetChan(nearbyChan).Nearby(key).Point(33.5, -115.5).Radius(5000).Do(ctx); err != nil {
+		t.Fatalf("setchan nearby: %v", err)
+	}
+
 	if err := c.DelHook(hook).Do(ctx); err != nil {
 		t.Fatalf("delhook: %v", err)
 	}

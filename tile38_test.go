@@ -394,6 +394,34 @@ func TestHookAssembly(t *testing.T) {
 			want: []string{"SETHOOK", "h", "http://x/y", "NEARBY", "fleet", "FENCE",
 				"NODWELL", "ROAM", "targets", "*", "500"},
 		},
+		// NEARBY reads "POINT lat lon meters" and rejects CIRCLE, so a hook or
+		// channel fencing on NEARBY needs its own POINT area — without one the
+		// trigger cannot emit a command the server accepts at all.
+		"nearby point area": {
+			build: func(c *Client) error {
+				return c.SetChan("zone").Nearby("fleet").Point(33.5, -115.5).Radius(5000).Do(t.Context())
+			},
+			want: []string{"SETCHAN", "zone", "NEARBY", "fleet", "FENCE",
+				"POINT", "33.5", "-115.5", "5000"},
+		},
+		// The radius is the trailing argument of the area, so it has to attach at
+		// exec time rather than in call order.
+		"nearby point area, radius chained first": {
+			build: func(c *Client) error {
+				return c.SetHook("h").Radius(5000).Endpoint("http://x", "y").
+					Detect(Enter).Nearby("fleet").Point(33.5, -115.5).Do(t.Context())
+			},
+			want: []string{"SETHOOK", "h", "http://x/y", "NEARBY", "fleet", "FENCE",
+				"DETECT", "enter", "POINT", "33.5", "-115.5", "5000"},
+		},
+		// A ROAM area carries its own radius, so a stray Radius must not attach.
+		"radius never attaches to roam": {
+			build: func(c *Client) error {
+				return c.SetChan("zone").Nearby("fleet").Radius(5000).Roam("targets", 500).Do(t.Context())
+			},
+			want: []string{"SETCHAN", "zone", "NEARBY", "fleet", "FENCE",
+				"ROAM", "targets", "*", "500"},
+		},
 		// MATCH is an option on the trigger collection: it renders after WITHIN
 		// and before the FENCE clause, whichever order it is chained in.
 		"match filters the trigger before the fence": {
