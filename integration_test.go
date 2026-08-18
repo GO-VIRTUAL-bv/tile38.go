@@ -846,6 +846,7 @@ func TestHooks(t *testing.T) {
 	t.Cleanup(func() { _ = c.DelHook(hook).Do(context.Background()) })
 
 	if err := c.SetHook(hook).Endpoint("http://127.0.0.1:9999", "events").
+		Meta("team", "ops").
 		Within(key).Detect(Inside).Commands(CommandSet).Bounds(GlobalBounds()).Do(ctx); err != nil {
 		t.Fatalf("sethook: %v", err)
 	}
@@ -868,6 +869,11 @@ func TestHooks(t *testing.T) {
 	}
 	if len(found.Endpoints) == 0 || found.Endpoints[0] != "http://127.0.0.1:9999/events" {
 		t.Errorf("hook endpoints = %v", found.Endpoints)
+	}
+	// Element 4 of the descriptor is the META the hook was created with; without
+	// it a listing cannot tell two hooks on the same key apart.
+	if found.Meta["team"] != "ops" {
+		t.Errorf("hook meta = %v, want team=ops", found.Meta)
 	}
 
 	// NEARBY takes a POINT area and rejects CIRCLE, so this is the only shape a

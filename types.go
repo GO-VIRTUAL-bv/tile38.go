@@ -68,8 +68,9 @@ type BoundsResult struct {
 
 // HookInfo describes a registered hook (HOOKS) or pub/sub channel (CHANS).
 type HookInfo struct {
-	Name      string   // hook or channel name
-	Key       string   // collection the fence watches
-	Endpoints []string // delivery targets; "local://<name>" for channels
-	Command   []string // the fence command tokens the hook was created with
+	Name      string            // hook or channel name
+	Key       string            // collection the fence watches
+	Endpoints []string          // delivery targets; "local://<name>" for channels
+	Command   []string          // the fence command tokens the hook was created with
+	Meta      map[string]string // the META pairs the hook was created with
 }

@@ -280,8 +280,8 @@ func parseBoundsResult(prefix string, val any, lonFirst bool) (BoundsResult, err
 }
 
 // parseHooks parses a HOOKS or CHANS response into []HookInfo. Each descriptor
-// is [name, key, [endpoint …], [command token …], [meta …]]; channels report a
-// single "local://<name>" endpoint.
+// is [name, key, [endpoint …], [command token …], [meta name, value …]];
+// channels report a single "local://<name>" endpoint.
 func parseHooks(prefix string, val any) ([]HookInfo, error) {
 	outer, ok := val.([]any)
 	if !ok {
@@ -304,6 +304,10 @@ func parseHooks(prefix string, val any) ([]HookInfo, error) {
 		}
 		if len(desc) > 3 {
 			hook.Command, _ = parseStringSlice(prefix, desc[3])
+		}
+		if len(desc) > 4 {
+			// Meta arrives in the same flat [name, value, …] shape as fields.
+			hook.Meta = parseFields(desc[4])
 		}
 		hooks = append(hooks, hook)
 	}
