@@ -37,10 +37,18 @@ jobs:
       - name: Run go vet
         run: make vet
 
+      # Pinned in .golangci-version, which `make lint` checks the local binary
+      # against. On "latest" a new release silently changes what CI enforces, so
+      # a clean local run stopped predicting CI — which is how a goconst finding
+      # reached main. Bump the file to adopt a new version deliberately.
+      - name: Read the pinned golangci-lint version
+        id: golangci
+        run: echo "version=$(cat .golangci-version)" >> "$GITHUB_OUTPUT"
+
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v9
         with:
-          version: latest
+          version: ${{ steps.golangci.outputs.version }}
           args: --timeout=5m
 
       # The integration tests are behind a build tag, so the default run skips
@@ -48,7 +56,7 @@ jobs:
       - name: Run golangci-lint (integration tag)
         uses: golangci/golangci-lint-action@v9
         with:
-          version: latest
+          version: ${{ steps.golangci.outputs.version }}
           args: --timeout=5m --build-tags=integration
 
   test:

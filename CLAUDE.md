@@ -37,6 +37,13 @@ Integration tests are behind the `integration` build tag, so a plain
 `go vet ./...` or `golangci-lint run ./...` skips that file entirely — always
 run both tag sets, which is what `make lint` and `make vet` do.
 
+The linter version is pinned in `.golangci-version`, which the CI workflow reads
+and `make lint` checks the local binary against before running. It was `latest`
+in CI once, so a new golangci-lint release silently changed what CI enforced and
+a clean local run stopped predicting it — which is how a `goconst` finding got
+past review. Bump the file to adopt a new version deliberately, the same way
+`.version` handles the server.
+
 `.golangci.yml` follows the sibling `common` repo. Its exclusions are
 deliberate and explained inline: complexity metrics are waived for `resp.go`
 (flat protocol switches) and `dupl` for the parallel search builders. Prefer
