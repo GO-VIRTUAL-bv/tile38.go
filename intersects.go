@@ -6,6 +6,7 @@ package tile38
 
 import (
 	"context"
+	"iter"
 )
 
 // IntersectsCmd builds a Tile38 INTERSECTS query.
@@ -13,13 +14,15 @@ import (
 // whereas WITHIN requires full containment.
 // Methods may be chained in any order; the parts are assembled into protocol
 // order when the command runs.
-type IntersectsCmd[T any] struct {
+//
+// The type parameter is the element type Do returns a slice of; see NearbyCmd.
+type IntersectsCmd[E any] struct {
 	*searchState
-	out format
+	out format[E]
 }
 
 // Limit caps the number of results. Zero means no limit.
-func (cmd *IntersectsCmd[T]) Limit(n int) *IntersectsCmd[T] {
+func (cmd *IntersectsCmd[E]) Limit(n int) *IntersectsCmd[E] {
 	cmd.opts.limit = &n
 	return cmd
 }
@@ -28,63 +31,63 @@ func (cmd *IntersectsCmd[T]) Limit(n int) *IntersectsCmd[T] {
 // CURSOR keyword. Pass the value NextCursor reported. Setting it also means the
 // caller is paging deliberately, so a truncated result no longer reports
 // ErrTruncated. Tile38 rejects CURSOR on a fence, so Fence ignores it.
-func (cmd *IntersectsCmd[T]) Cursor(n uint64) *IntersectsCmd[T] {
+func (cmd *IntersectsCmd[E]) Cursor(n uint64) *IntersectsCmd[E] {
 	cmd.opts.cursor = &n
 	return cmd
 }
 
 // NextCursor reports where to resume after the last executed terminal. It is
 // non-zero only when Tile38 stopped at the limit with more objects matching.
-func (cmd *IntersectsCmd[T]) NextCursor() uint64 { return cmd.cursorOut }
+func (cmd *IntersectsCmd[E]) NextCursor() uint64 { return cmd.cursorOut }
 
 // Where sets an optional Tile38 field expression filter.
-func (cmd *IntersectsCmd[T]) Where(expr string) *IntersectsCmd[T] {
+func (cmd *IntersectsCmd[E]) Where(expr string) *IntersectsCmd[E] {
 	cmd.args = append(cmd.args, "WHERE", expr)
 	return cmd
 }
 
 // Match filters results by ID pattern (glob-style, e.g. "truck:*").
-func (cmd *IntersectsCmd[T]) Match(pattern string) *IntersectsCmd[T] {
+func (cmd *IntersectsCmd[E]) Match(pattern string) *IntersectsCmd[E] {
 	cmd.args = append(cmd.args, "MATCH", pattern)
 	return cmd
 }
 
 // WhereIn keeps results whose field holds one of the given values, matching
 // Tile38's WHEREIN keyword. It accumulates: each call adds another filter.
-func (cmd *IntersectsCmd[T]) WhereIn(field string, values ...any) *IntersectsCmd[T] {
+func (cmd *IntersectsCmd[E]) WhereIn(field string, values ...any) *IntersectsCmd[E] {
 	cmd.args = append(cmd.args, whereInTokens(field, values)...)
 	return cmd
 }
 
 // NoFields drops field values from the reply, matching Tile38's NOFIELDS keyword.
-func (cmd *IntersectsCmd[T]) NoFields() *IntersectsCmd[T] {
+func (cmd *IntersectsCmd[E]) NoFields() *IntersectsCmd[E] {
 	cmd.opts.nofields = true
 	return cmd
 }
 
 // Clip trims returned objects to the search area rather than returning them
 // whole, matching Tile38's CLIP keyword.
-func (cmd *IntersectsCmd[T]) Clip() *IntersectsCmd[T] {
+func (cmd *IntersectsCmd[E]) Clip() *IntersectsCmd[E] {
 	cmd.opts.clip = true
 	return cmd
 }
 
 // Sparse spreads results evenly over the search area at the given depth (1-8),
 // matching Tile38's SPARSE keyword. Tile38 rejects SPARSE combined with Limit.
-func (cmd *IntersectsCmd[T]) Sparse(depth int) *IntersectsCmd[T] {
+func (cmd *IntersectsCmd[E]) Sparse(depth int) *IntersectsCmd[E] {
 	cmd.opts.sparse = &depth
 	return cmd
 }
 
 // Detect restricts a live fence to the given transitions. Only meaningful with Fence.
-func (cmd *IntersectsCmd[T]) Detect(states ...DetectState) *IntersectsCmd[T] {
+func (cmd *IntersectsCmd[E]) Detect(states ...DetectState) *IntersectsCmd[E] {
 	cmd.detect = states
 	return cmd
 }
 
 // Commands restricts a live fence to events caused by the given commands.
 // Only meaningful with Fence.
-func (cmd *IntersectsCmd[T]) Commands(commands ...Command) *IntersectsCmd[T] {
+func (cmd *IntersectsCmd[E]) Commands(commands ...Command) *IntersectsCmd[E] {
 	cmd.commands = commands
 	return cmd
 }
@@ -93,7 +96,7 @@ func (cmd *IntersectsCmd[T]) Commands(commands ...Command) *IntersectsCmd[T] {
 // fence produces, matching Tile38's DISTANCE keyword. It arrives on FenceEvent
 // as Distance, and applies to the live fence only — a plain query reads the same
 // value through PointsWithDistance.
-func (cmd *IntersectsCmd[T]) Distance() *IntersectsCmd[T] {
+func (cmd *IntersectsCmd[E]) Distance() *IntersectsCmd[E] {
 	cmd.distance = true
 	return cmd
 }
@@ -101,14 +104,14 @@ func (cmd *IntersectsCmd[T]) Distance() *IntersectsCmd[T] {
 // WhereEval keeps results for which the given Lua script returns true, matching
 // Tile38's WHEREEVAL keyword. The script sees the object's fields as FIELDS and
 // the extra arguments as ARGV. It accumulates: each call adds another filter.
-func (cmd *IntersectsCmd[T]) WhereEval(script string, args ...any) *IntersectsCmd[T] {
+func (cmd *IntersectsCmd[E]) WhereEval(script string, args ...any) *IntersectsCmd[E] {
 	cmd.args = append(cmd.args, countedTokens("WHEREEVAL", script, args)...)
 	return cmd
 }
 
 // WhereEvalSha is WhereEval against a script already loaded on the server,
 // matching Tile38's WHEREEVALSHA keyword.
-func (cmd *IntersectsCmd[T]) WhereEvalSha(sha string, args ...any) *IntersectsCmd[T] {
+func (cmd *IntersectsCmd[E]) WhereEvalSha(sha string, args ...any) *IntersectsCmd[E] {
 	cmd.args = append(cmd.args, countedTokens("WHEREEVALSHA", sha, args)...)
 	return cmd
 }
@@ -121,31 +124,31 @@ func (cmd *IntersectsCmd[T]) WhereEvalSha(sha string, args ...any) *IntersectsCm
 //
 // It is appended rather than stored: Tile38 has no duplicate guard for BUFFER,
 // so a repeat is legal and the last one wins.
-func (cmd *IntersectsCmd[T]) Buffer(metres int) *IntersectsCmd[T] {
+func (cmd *IntersectsCmd[E]) Buffer(metres int) *IntersectsCmd[E] {
 	cmd.args = append(cmd.args, "BUFFER", metres)
 	return cmd
 }
 
 // Get sets the search area to an object already stored in Tile38 (GET keyword).
-func (cmd *IntersectsCmd[T]) Get(collection, id string) *IntersectsCmd[T] {
+func (cmd *IntersectsCmd[E]) Get(collection, id string) *IntersectsCmd[E] {
 	cmd.geom = []any{"GET", collection, id}
 	return cmd
 }
 
 // Object sets the search area to an inline GeoJSON string (OBJECT keyword).
-func (cmd *IntersectsCmd[T]) Object(geojson string) *IntersectsCmd[T] {
+func (cmd *IntersectsCmd[E]) Object(geojson string) *IntersectsCmd[E] {
 	cmd.geom = []any{"OBJECT", geojson}
 	return cmd
 }
 
 // Bounds sets the search area to a lat/lon bounding box (BOUNDS keyword).
-func (cmd *IntersectsCmd[T]) Bounds(swLat, swLon, neLat, neLon float64) *IntersectsCmd[T] {
+func (cmd *IntersectsCmd[E]) Bounds(swLat, swLon, neLat, neLon float64) *IntersectsCmd[E] {
 	cmd.geom = []any{"BOUNDS", swLat, swLon, neLat, neLon}
 	return cmd
 }
 
 // Circle sets the search area to a circle with centre + radius in metres (CIRCLE keyword).
-func (cmd *IntersectsCmd[T]) Circle(lat, lon float64, radius int) *IntersectsCmd[T] {
+func (cmd *IntersectsCmd[E]) Circle(lat, lon float64, radius int) *IntersectsCmd[E] {
 	cmd.geom = []any{"CIRCLE", lat, lon, radius}
 	return cmd
 }
@@ -154,7 +157,7 @@ func (cmd *IntersectsCmd[T]) Circle(lat, lon float64, radius int) *IntersectsCmd
 // cell id (A5 keyword). Requires a server built from upstream master: A5 is
 // merged upstream but has shipped in no release tag as of 1.38.0. Tile38 accepts
 // A5 as a search area only, not as a hook or channel fence area.
-func (cmd *IntersectsCmd[T]) A5(cellID string) *IntersectsCmd[T] {
+func (cmd *IntersectsCmd[E]) A5(cellID string) *IntersectsCmd[E] {
 	cmd.geom = []any{"A5", cellID}
 	return cmd
 }
@@ -162,84 +165,103 @@ func (cmd *IntersectsCmd[T]) A5(cellID string) *IntersectsCmd[T] {
 // Sector sets the search area to a circular sector: a circle of radius metres
 // centred on lat/lon, clipped to the arc between two compass bearings in
 // degrees. Matches Tile38's SECTOR keyword, which NEARBY does not accept.
-func (cmd *IntersectsCmd[T]) Sector(lat, lon float64, metres int, bearing1, bearing2 float64) *IntersectsCmd[T] {
+func (cmd *IntersectsCmd[E]) Sector(lat, lon float64, metres int, bearing1, bearing2 float64) *IntersectsCmd[E] {
 	cmd.geom = []any{"SECTOR", lat, lon, metres, bearing1, bearing2}
 	return cmd
 }
 
 // Hash sets the search area to the box a geohash covers, matching Tile38's HASH
 // keyword. The shorter the hash, the larger the box.
-func (cmd *IntersectsCmd[T]) Hash(geohash string) *IntersectsCmd[T] {
+func (cmd *IntersectsCmd[E]) Hash(geohash string) *IntersectsCmd[E] {
 	cmd.geom = []any{"HASH", geohash}
 	return cmd
 }
 
 // QuadKey sets the search area to the tile a Bing Maps quadkey names, matching
 // Tile38's QUADKEY keyword. Tile is the same area expressed as x/y/z.
-func (cmd *IntersectsCmd[T]) QuadKey(quadkey string) *IntersectsCmd[T] {
+func (cmd *IntersectsCmd[E]) QuadKey(quadkey string) *IntersectsCmd[E] {
 	cmd.geom = []any{"QUADKEY", quadkey}
 	return cmd
 }
 
 // Tile sets the search area to a single XYZ map tile (TILE keyword).
-func (cmd *IntersectsCmd[T]) Tile(x, y, z int) *IntersectsCmd[T] {
+func (cmd *IntersectsCmd[E]) Tile(x, y, z int) *IntersectsCmd[E] {
 	cmd.geom = []any{"TILE", x, y, z}
 	return cmd
 }
 
 // IDs selects the IDS output format: INTERSECTS collection [opts] IDS <area>.
 // It is what a fresh command already emits, and is here to switch back.
-func (cmd *IntersectsCmd[T]) IDs() *IntersectsCmd[IDs] {
-	return &IntersectsCmd[IDs]{cmd.clone(), formatIDs}
+func (cmd *IntersectsCmd[E]) IDs() *IntersectsCmd[string] {
+	return &IntersectsCmd[string]{cmd.clone(), formatIDs}
 }
 
 // Points selects the POINTS output format: INTERSECTS collection [opts] POINTS <area>.
-func (cmd *IntersectsCmd[T]) Points() *IntersectsCmd[Points] {
-	return &IntersectsCmd[Points]{cmd.clone(), formatPoints}
+func (cmd *IntersectsCmd[E]) Points() *IntersectsCmd[NearbyResult] {
+	return &IntersectsCmd[NearbyResult]{cmd.clone(), formatPoints}
 }
 
 // Objects selects the OBJECTS output format: INTERSECTS collection [opts] OBJECTS <area>.
-func (cmd *IntersectsCmd[T]) Objects() *IntersectsCmd[Objects] {
-	return &IntersectsCmd[Objects]{cmd.clone(), formatObjects}
+func (cmd *IntersectsCmd[E]) Objects() *IntersectsCmd[SearchObject] {
+	return &IntersectsCmd[SearchObject]{cmd.clone(), formatObjects}
 }
 
 // Rects selects the BOUNDS output format: INTERSECTS collection [opts] BOUNDS <area>.
 // Each result is the bounding box of a matching object, lat first.
-func (cmd *IntersectsCmd[T]) Rects() *IntersectsCmd[Rects] {
-	return &IntersectsCmd[Rects]{cmd.clone(), formatRects}
+func (cmd *IntersectsCmd[E]) Rects() *IntersectsCmd[RectResult] {
+	return &IntersectsCmd[RectResult]{cmd.clone(), formatRects}
 }
 
 // Hashes selects the HASHES output format: INTERSECTS collection [opts] HASHES precision <area>.
 // Each result is the geohash of a matching object's centre.
-func (cmd *IntersectsCmd[T]) Hashes(precision int) *IntersectsCmd[Hashes] {
-	return &IntersectsCmd[Hashes]{cmd.clone(), formatHashes(precision)}
+func (cmd *IntersectsCmd[E]) Hashes(precision int) *IntersectsCmd[HashResult] {
+	return &IntersectsCmd[HashResult]{cmd.clone(), formatHashes(precision)}
 }
 
 // A5Cells selects the A5 output format: INTERSECTS collection [opts] A5 level <area>.
 // Requires a server built from upstream master.
-func (cmd *IntersectsCmd[T]) A5Cells(level int) *IntersectsCmd[A5Cells] {
-	return &IntersectsCmd[A5Cells]{cmd.clone(), formatA5Cells(level)}
+func (cmd *IntersectsCmd[E]) A5Cells(level int) *IntersectsCmd[A5Result] {
+	return &IntersectsCmd[A5Result]{cmd.clone(), formatA5Cells(level)}
 }
 
 // Do executes the command in whichever output format was selected, defaulting
 // to IDS. It reports ErrTruncated when Tile38 capped an unbounded search.
-func (cmd *IntersectsCmd[T]) Do(ctx context.Context) (T, error) {
-	return searchDo[T](ctx, cmd.searchState, cmd.out)
+func (cmd *IntersectsCmd[E]) Do(ctx context.Context) ([]E, error) {
+	return searchDo(ctx, cmd.searchState, cmd.out)
 }
 
-// Count selects the COUNT output format: INTERSECTS collection [opts] COUNT <area>.
-// Do then returns the number of matching objects.
+// Iter pages the search to completion, yielding one result at a time in whichever
+// output format was selected. It never reports ErrTruncated: following the
+// cursor is what it does instead.
 //
-// COUNT is the one format whose reply is a bare integer rather than a cursor
-// and a list, so it reports no truncation: the server exempts it from the
-// hundred-result cap that ErrTruncated exists to surface.
-func (cmd *IntersectsCmd[T]) Count() *IntersectsCmd[int] {
-	return &IntersectsCmd[int]{cmd.clone(), formatCount}
+//	for obj, err := range cmd.Objects().Iter(ctx) {
+//		if err != nil {
+//			return err
+//		}
+//		use(obj)
+//	}
+//
+// An explicit Limit or Cursor is the caller's own bound, so Iter yields that one
+// page rather than paging past it. Breaking out of the range just stops asking
+// for pages; nothing is left open.
+func (cmd *IntersectsCmd[E]) Iter(ctx context.Context) iter.Seq2[E, error] {
+	return searchIter(ctx, cmd.searchState, cmd.out)
+}
+
+// Count runs the COUNT form: INTERSECTS collection [opts] COUNT <area>.
+// It returns the number of matching objects.
+//
+// COUNT is a terminal rather than an output format: its reply is a bare
+// integer, so there is no element type for a builder to carry, and it reports
+// no truncation because the server exempts it from the hundred-result cap
+// that ErrTruncated exists to surface.
+func (cmd *IntersectsCmd[E]) Count(ctx context.Context) (int, error) {
+	return searchCount(ctx, cmd.searchState)
 }
 
 // Fence opens a live geofence: INTERSECTS collection [opts] FENCE [DETECT …] <area>.
 // The returned Stream holds a dedicated connection and delivers events until it
 // is closed or ctx is cancelled.
-func (cmd *IntersectsCmd[T]) Fence(ctx context.Context) (*Stream, error) {
+func (cmd *IntersectsCmd[E]) Fence(ctx context.Context) (*Stream, error) {
 	return cmd.c.fenceStream(ctx, cmd.fenceArgs())
 }

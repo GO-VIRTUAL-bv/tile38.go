@@ -38,8 +38,9 @@ fields; `NX`/`XX` gate on existence.
 
 Verbs: `Nearby`, `Within`, `Intersects`, `Scan`.
 
-A search ends in `Do(ctx)`. An output-format method decides what `Do` returns —
-it is chained, not a terminal, and may be called either side of the options:
+A search ends in `Do(ctx)`, `Iter(ctx)`, `Count(ctx)` or `Fence(ctx)`. An
+output-format method decides what `Do` returns and what `Iter` yields — it is
+chained, not a terminal, and may be called either side of the options:
 
 | Format | `Do` returns | underlying |
 | --- | --- | --- |
@@ -52,11 +53,11 @@ it is chained, not a terminal, and may be called either side of the options:
 | `Hashes(precision)` | `Hashes` | `[]HashResult` |
 | `A5Cells(level)` | `A5Cells` | `[]A5Result` |
 | `Strings()` | `Strings` | `[]StringObject` (Search only) |
-| `Count()` | `int` | bare integer; exempt from the 100 cap, never `ErrTruncated` |
+| `Count(ctx)` | `int` | terminal, not a format: bare integer, exempt from the 100 cap, never `ErrTruncated` |
 
-Each result type is a named slice, so it behaves as its underlying slice —
-range, index, `len`. Note `reflect.DeepEqual` compares types, so a test wanting
-`Points{…}` will not match `[]NearbyResult{…}`.
+Each result type is an alias for its slice, so it behaves as that slice —
+range, index, `len` — and is the *same* type: `Points` and `[]NearbyResult` are
+interchangeable, including under `reflect.DeepEqual`.
 
 One terminal sits outside that path, because it returns no value at all:
 
@@ -79,7 +80,7 @@ One terminal sits outside that path, because it returns no value at all:
 ### Single-use options (calling twice overwrites)
 
 - `Limit(n)` — also silences `ErrTruncated`
-- `Cursor(n)` — resume offset; pair with `NextCursor()`
+- `Cursor(n)` — resume offset; pair with `NextCursor()`, or let `Iter` drive it
 - `Sparse(n)` — spread results (not on `Scan`; server rejects it)
 - `NoFields()` — omit field data
 - `Clip()` — clip objects to the search area
@@ -87,10 +88,27 @@ One terminal sits outside that path, because it returns no value at all:
 ```go
 pts, err  := c.Nearby("fleet").Limit(10).Point(33.5, -115.5).Radius(5000).Points().Do(ctx)
 ids, err  := c.Nearby("fleet").Where("speed > 40").Point(33.5, -115.5).Radius(5000).Do(ctx)
-n, err    := c.Within("fleet").Bounds(33, -116, 34, -115).Count().Do(ctx)
+n, err    := c.Within("fleet").Bounds(33, -116, 34, -115).Count(ctx)
 objs, err := c.Intersects("fleet").Circle(33.5, -115.5, 5000).Objects().Do(ctx)
 near, err := c.Nearby("fleet").Point(33.5, -115.5).Radius(5000).PointsWithDistance().Do(ctx)
 trucks, err := c.Scan("fleet").Match("truck:*").Do(ctx)
+```
+
+`Iter(ctx)` replaces `Do` when you want every match rather than one page. It
+returns `iter.Seq2[E, error]`, pages by cursor itself, yields one result at a
+time, and never reports `ErrTruncated`. An explicit `Limit`/`Cursor` bounds it to
+that one page; breaking out early just stops requesting pages.
+
+```go
+for id, err := range c.Scan("fleet").Iter(ctx) {
+	if err != nil {
+		return err
+	}
+	use(id)
+}
+for obj, err := range c.Within("fleet").Circle(51.05, 3.72, 500).Objects().Iter(ctx) {
+	…
+}
 ```
 
 Chain order is irrelevant — parts assemble into protocol order at exec time,
@@ -203,9 +221,9 @@ Use `errors.As` / `errors.Is`.
 
 ## Gotchas
 
-- **Truncation is silent without the check** — handle `ErrTruncated` on searches
-  or set an explicit `Limit`. Tile38 caps every search except `Count` at 100 with
-  no `Limit`.
+- **Truncation is silent without the check** — handle `ErrTruncated` on searches,
+  set an explicit `Limit`, or use `Iter(ctx)`, which pages for you. Tile38 caps
+  every search except `Count` at 100 with no `Limit`.
 - **`Count` returns a bare integer** and is exempt from the cap.
 - **Streams aren't pooled** and ignore `WithMaxActive`/`WithTimeout`; they hold a
   dedicated connection until `Close`.
