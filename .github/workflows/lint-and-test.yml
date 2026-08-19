@@ -1,10 +1,10 @@
 name: Lint and Test
 
 on:
+  # No branch filter: a stacked PR targets the branch below it in the stack, not
+  # main, and filtering to main left those PRs with no checks at all — which is
+  # indistinguishable from passing when it comes time to merge one.
   pull_request:
-    branches:
-      - main
-      - develop
   push:
     branches:
       - main
