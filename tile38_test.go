@@ -1934,3 +1934,178 @@ func TestIter(t *testing.T) {
 		}
 	})
 }
+
+// Fields holds Tile38's text encoding, so FieldOf is the hot path for reading a
+// number off a search result. ok collapses "absent" and "undecodable" — both are
+// a miss, and the zero value comes back either way.
+func TestFieldOf(t *testing.T) {
+	f := Fields{
+		"speed":   "42.5",
+		"count":   "7",
+		"active":  "true",
+		"driver":  "bob",
+		"blank":   "",
+		"geojson": `{"type":"Point"}`,
+	}
+
+	t.Run("decodes each supported type", func(t *testing.T) {
+		if v, ok := FieldOf[float64](f, "speed"); !ok || v != 42.5 {
+			t.Errorf("float64 = %v, %v; want 42.5, true", v, ok)
+		}
+		if v, ok := FieldOf[int64](f, "count"); !ok || v != 7 {
+			t.Errorf("int64 = %v, %v; want 7, true", v, ok)
+		}
+		if v, ok := FieldOf[bool](f, "active"); !ok || !v {
+			t.Errorf("bool = %v, %v; want true, true", v, ok)
+		}
+		if v, ok := FieldOf[string](f, "driver"); !ok || v != "bob" {
+			t.Errorf("string = %q, %v; want \"bob\", true", v, ok)
+		}
+		// A JSON field stays raw text: normalising it further is the caller's
+		// business, and Fields.UnmarshalJSON has already made the two arrival
+		// paths agree.
+		if v, ok := FieldOf[string](f, "geojson"); !ok || v != `{"type":"Point"}` {
+			t.Errorf("json = %q, %v; want the raw text, true", v, ok)
+		}
+	})
+
+	// int64 goes through ParseInt, so a fractional value is a miss rather than a
+	// silent truncation to 42. Nobody should "fix" this into ParseFloat + cast.
+	t.Run("int64 rejects a fractional value", func(t *testing.T) {
+		if v, ok := FieldOf[int64](f, "speed"); ok || v != 0 {
+			t.Errorf("int64 of %q = %v, %v; want 0, false", f["speed"], v, ok)
+		}
+	})
+
+	t.Run("a miss yields the zero value", func(t *testing.T) {
+		for name, tc := range map[string]func() (any, bool){
+			"absent":              func() (any, bool) { v, ok := FieldOf[float64](f, "nope"); return v, ok },
+			"undecodable":         func() (any, bool) { v, ok := FieldOf[float64](f, "driver"); return v, ok },
+			"empty string as num": func() (any, bool) { v, ok := FieldOf[float64](f, "blank"); return v, ok },
+			// Nil is what an object with no non-zero fields, or a NoFields
+			// query, hands back — an ordinary lookup miss, not a panic.
+			"nil Fields": func() (any, bool) { v, ok := FieldOf[int64](nil, "speed"); return v, ok },
+		} {
+			t.Run(name, func(t *testing.T) {
+				v, ok := tc()
+				if ok {
+					t.Errorf("ok = true, want false")
+				}
+				if v != reflect.Zero(reflect.TypeOf(v)).Interface() {
+					t.Errorf("value = %v, want the zero value", v)
+				}
+			})
+		}
+		// An empty string is a legitimate string, unlike a number.
+		if v, ok := FieldOf[string](f, "blank"); !ok || v != "" {
+			t.Errorf("string of an empty field = %q, %v; want \"\", true", v, ok)
+		}
+	})
+
+	// Every type in FieldValue decodes, and byte/rune come along as aliases of
+	// uint8/int32.
+	t.Run("decodes every width", func(t *testing.T) {
+		w := Fields{"n": "42", "neg": "-42", "f": "1.5"}
+		if v, ok := FieldOf[float32](w, "f"); !ok || v != 1.5 {
+			t.Errorf("float32 = %v, %v; want 1.5, true", v, ok)
+		}
+		if v, ok := FieldOf[int](w, "neg"); !ok || v != -42 {
+			t.Errorf("int = %v, %v; want -42, true", v, ok)
+		}
+		if v, ok := FieldOf[int8](w, "neg"); !ok || v != -42 {
+			t.Errorf("int8 = %v, %v; want -42, true", v, ok)
+		}
+		if v, ok := FieldOf[int16](w, "n"); !ok || v != 42 {
+			t.Errorf("int16 = %v, %v; want 42, true", v, ok)
+		}
+		if v, ok := FieldOf[int32](w, "n"); !ok || v != 42 {
+			t.Errorf("int32 = %v, %v; want 42, true", v, ok)
+		}
+		if v, ok := FieldOf[uint](w, "n"); !ok || v != 42 {
+			t.Errorf("uint = %v, %v; want 42, true", v, ok)
+		}
+		if v, ok := FieldOf[uint8](w, "n"); !ok || v != 42 {
+			t.Errorf("uint8 = %v, %v; want 42, true", v, ok)
+		}
+		if v, ok := FieldOf[uint16](w, "n"); !ok || v != 42 {
+			t.Errorf("uint16 = %v, %v; want 42, true", v, ok)
+		}
+		if v, ok := FieldOf[uint32](w, "n"); !ok || v != 42 {
+			t.Errorf("uint32 = %v, %v; want 42, true", v, ok)
+		}
+		if v, ok := FieldOf[uint64](w, "n"); !ok || v != 42 {
+			t.Errorf("uint64 = %v, %v; want 42, true", v, ok)
+		}
+		if v, ok := FieldOf[byte](w, "n"); !ok || v != 42 { // byte is uint8
+			t.Errorf("byte = %v, %v; want 42, true", v, ok)
+		}
+		if v, ok := FieldOf[rune](w, "n"); !ok || v != 42 { // rune is int32
+			t.Errorf("rune = %v, %v; want 42, true", v, ok)
+		}
+	})
+
+	// The bit size passed to strconv is what makes a decode exact. A value the
+	// target cannot hold is a miss, never a wrapped or truncated number.
+	t.Run("a value the type cannot hold is a miss", func(t *testing.T) {
+		w := Fields{"big": "300", "neg": "-1", "huge": "99999999999999999999", "big32": "1e39"}
+		for name, tc := range map[string]func() (any, bool){
+			"int8 overflow":    func() (any, bool) { v, ok := FieldOf[int8](w, "big"); return v, ok },
+			"uint8 overflow":   func() (any, bool) { v, ok := FieldOf[uint8](w, "big"); return v, ok },
+			"uint negative":    func() (any, bool) { v, ok := FieldOf[uint](w, "neg"); return v, ok },
+			"uint64 negative":  func() (any, bool) { v, ok := FieldOf[uint64](w, "neg"); return v, ok },
+			"int64 overflow":   func() (any, bool) { v, ok := FieldOf[int64](w, "huge"); return v, ok },
+			"float32 overflow": func() (any, bool) { v, ok := FieldOf[float32](w, "big32"); return v, ok },
+		} {
+			t.Run(name, func(t *testing.T) {
+				v, ok := tc()
+				if ok {
+					t.Errorf("ok = true, want false (got %v)", v)
+				}
+				if v != reflect.Zero(reflect.TypeOf(v)).Interface() {
+					t.Errorf("value = %v, want the zero value", v)
+				}
+			})
+		}
+		// int16 holds 300 fine — the miss above is the width, not the value.
+		if v, ok := FieldOf[int16](w, "big"); !ok || v != 300 {
+			t.Errorf("int16 = %v, %v; want 300, true", v, ok)
+		}
+	})
+
+	t.Run("MustFieldOf returns the value when it decodes", func(t *testing.T) {
+		if v := MustFieldOf[float64](f, "speed"); v != 42.5 {
+			t.Errorf("MustFieldOf = %v, want 42.5", v)
+		}
+	})
+
+	// The panic names both possibilities, because MustFieldOf cannot tell an
+	// absent field from an undecodable one.
+	t.Run("MustFieldOf panics on a miss", func(t *testing.T) {
+		for name, tc := range map[string]struct {
+			call func()
+			want string
+		}{
+			"absent": {
+				call: func() { MustFieldOf[float64](f, "missing") },
+				want: `tile38: field "missing" is missing or not a float64`,
+			},
+			"undecodable": {
+				call: func() { MustFieldOf[int64](f, "driver") },
+				want: `tile38: field "driver" is missing or not a int64`,
+			},
+		} {
+			t.Run(name, func(t *testing.T) {
+				defer func() {
+					r := recover()
+					if r == nil {
+						t.Fatal("no panic, want one")
+					}
+					if got, ok := r.(string); !ok || got != tc.want {
+						t.Errorf("panic = %v, want %q", r, tc.want)
+					}
+				}()
+				tc.call()
+			})
+		}
+	})
+}

@@ -4,7 +4,12 @@
 
 package tile38
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"fmt"
+	"reflect"
+	"strconv"
+)
 
 // Result types returned by the command builders. Coordinates are always
 // {lat, lon}, matching the order Tile38 takes them in, with the optional third
@@ -38,6 +43,104 @@ func (f *Fields) UnmarshalJSON(data []byte) error {
 	}
 	*f = out
 	return nil
+}
+
+// FieldValue is what FieldOf can decode a field into: every basic numeric type
+// Go has, plus bool and string. Aliases come along for free — byte is uint8 and
+// rune is int32, so FieldOf[byte] and FieldOf[rune] work.
+//
+// There are no ~ terms, so a defined type such as "type Knots float64" is a
+// compile error rather than something FieldOf accepts:
+//
+//	Knots does not satisfy FieldValue (possibly missing ~ for float64 in FieldValue)
+//
+// That is a deliberate narrowing rather than a limit of the decode — FieldOf
+// switches on the reflected kind, so a defined type would decode correctly if
+// the terms were widened. Adding the tildes stays source-compatible, so it can
+// wait until someone asks for it; taking them away again would not.
+type FieldValue interface {
+	float32 | float64 |
+		int | int8 | int16 | int32 | int64 |
+		uint | uint8 | uint16 | uint32 | uint64 |
+		bool | string
+}
+
+// FieldOf decodes the named field into T, which is what a caller wants from
+// Fields most of the time: the map holds Tile38's text encoding, so reading a
+// number off a result otherwise means a strconv call at every call site.
+//
+// ok is false when the field is absent *or* does not decode as a T. Those are
+// different bugs and this deliberately collapses them — when the difference
+// matters, index Fields directly and convert.
+//
+// Decoding is exact rather than lossy, so a value the target type cannot hold is
+// a miss, not a silent truncation: FieldOf[int64] rejects "42.5", FieldOf[int8]
+// rejects "300", and the unsigned types reject a negative. A miss always hands
+// back the zero value.
+//
+// A nil Fields is an ordinary miss, which is what an object with no non-zero
+// fields and a NoFields query both give back.
+//
+// Named FieldOf rather than Field because Field already builds a key/value pair
+// for the write builders.
+func FieldOf[T FieldValue](f Fields, name string) (value T, ok bool) {
+	raw, present := f[name]
+	if !present {
+		return value, false
+	}
+	// Switching on the reflected kind rather than on any(&value) handles all
+	// twelve numeric widths in three branches instead of twelve, and takes the
+	// bit size from the type itself — Bits is what makes the decode exact, and
+	// what gives int and uint their platform width for free. It costs a few ns
+	// against a type switch and allocates nothing, which is nothing beside the
+	// round trip that produced these fields.
+	v := reflect.ValueOf(&value).Elem()
+	switch v.Kind() {
+	case reflect.String:
+		v.SetString(raw)
+	case reflect.Bool:
+		n, err := strconv.ParseBool(raw)
+		if err != nil {
+			return value, false
+		}
+		v.SetBool(n)
+	case reflect.Float32, reflect.Float64:
+		n, err := strconv.ParseFloat(raw, v.Type().Bits())
+		if err != nil {
+			return value, false
+		}
+		v.SetFloat(n)
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		// ParseInt, so "42.5" is a miss rather than a truncation to 42.
+		n, err := strconv.ParseInt(raw, 10, v.Type().Bits())
+		if err != nil {
+			return value, false
+		}
+		v.SetInt(n)
+	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		n, err := strconv.ParseUint(raw, 10, v.Type().Bits())
+		if err != nil {
+			return value, false
+		}
+		v.SetUint(n)
+	default:
+		// Unreachable: FieldValue admits no other kind. Kept so that widening it
+		// to one this switch does not handle degrades to a miss rather than to a
+		// zero the caller is told is real.
+		return value, false
+	}
+	return value, true
+}
+
+// MustFieldOf is FieldOf for a field the caller knows is set. It panics when
+// FieldOf would report false, naming both possibilities because it cannot tell
+// them apart.
+func MustFieldOf[T FieldValue](f Fields, name string) T {
+	value, ok := FieldOf[T](f, name)
+	if !ok {
+		panic(fmt.Sprintf("tile38: field %q is missing or not a %T", name, value))
+	}
+	return value
 }
 
 // NearbyResult holds a single result from a Nearby or Scan query.
