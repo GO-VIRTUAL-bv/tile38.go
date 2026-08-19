@@ -48,11 +48,11 @@ linters:
       # ("invalid operation: Self is not a generic type"). Only their options
       # could be shared, which is not where the repetition is.
       #
-      # channel.go is a different case and is collapsible: SETCHAN's method set
-      # is a strict subset of SETHOOK's, with no output type parameter in the
-      # way. Tracked in #18 — drop channel.go from this exclusion once it lands.
+      # SETHOOK and SETCHAN were the one collapsible case, and are collapsed:
+      # they have no output type parameter in the way, so both share fenceBase
+      # and channel.go no longer needs the waiver.
       - linters: [dupl]
-        path: (builders|intersects|channel)\.go
+        path: (builders|intersects)\.go
       # Tests read as a linear sequence of arrange/assert steps. Complexity and
       # duplication metrics fight that structure without making them safer.
       - linters: [dupl, goconst, gocyclo, gocognit]

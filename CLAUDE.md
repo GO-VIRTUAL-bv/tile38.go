@@ -64,7 +64,7 @@ builders.go      write, read, search, hook builders + protocol token types
 intersects.go    INTERSECTS builder
 geometry.go      Area values + the TEST builder
 server.go        STATS, CONFIG, GC, HEALTHZ, READONLY, FOLLOW, TIMEOUT
-channel.go       SETCHAN / channel builders
+channel.go       SETCHAN / channel builders (chain methods live on fenceBase)
 json.go          JSET / JGET / JDEL builders
 management.go    DROP, RENAME, TTL, KEYS, BOUNDS, … builders
 stream.go        Stream (live fences and subscriptions)
@@ -163,6 +163,16 @@ return "the same `Self` at a different `E`", and Go has no higher-kinded types �
 `Self[NearbyResult]` fails to typecheck. The `dupl` waiver in `.golangci.yml`
 records this.
 
+**`HookCmd` and `SetChanCmd` do share a base**, because they have no output type
+parameter in the way. `fenceBase[Self]` holds a `fenceState` plus `self Self`, so
+each of the twenty shared chain methods returns the *concrete* builder and
+`HookCmd.Endpoint` stays reachable mid-chain. `Do` stays per-builder — SETHOOK
+assembles endpoints positionally and SETCHAN does not, which is the only real
+difference between them. `TestHookAndChanShareTheFenceGrammar` pins that one
+chain emits one grammar on both. The cost is cosmetic: godoc renders a promoted
+method's result as the unsubstituted `Self`, which is why both type docs say
+outright what a chain method returns.
+
 A format switch **clones** `searchState` rather than sharing the pointer, so two
 typed handles on one chain cannot mutate each other. `TestFormatSwitch` pins
 that, along with the default output, order-independence across the switch, and
@@ -193,10 +203,10 @@ locks that down. A geometry method must **assign** `cmd.geom`, never append to
 command. (An earlier design tracked a `geomLen` offset and spliced around it,
 which silently corrupted any chain that added an option after the geometry.)
 
-`HookCmd` and `SetChanCmd` are assembled the same way — their `Do` calls
-`buildSearch` with `fenceTokens(...)` — because SETHOOK and SETCHAN take a full
-search command after the name, with the same geometry-last rule.
-`TestHookAssembly` covers it.
+`HookCmd` and `SetChanCmd` are assembled the same way — both `Do`s hand their
+head to `fenceBase.buildFence`, which calls `buildSearch` with
+`fenceTokens(...)` — because SETHOOK and SETCHAN take a full search command
+after the name, with the same geometry-last rule. `TestHookAssembly` covers it.
 
 **Single-use options are fields, not appends.** Tile38 errors on a repeated
 `LIMIT`, `CURSOR`, `SPARSE`, `NOFIELDS`, `CLIP`, `DETECT`, `COMMANDS`, or
@@ -217,8 +227,8 @@ rejects "CURSOR ... FENCE". `ScanCmd` has no `Sparse`: the server rejects
 
 **Positional arguments are assembled, not appended — including on hooks.**
 `SETHOOK name <endpoints> [META k v]… [EX n] <trigger> …` takes the endpoint
-positionally, so `HookCmd` keeps `name`, `endpoints`, `meta`, `ex`, and
-`trigger` in separate fields and assembles them in `Do`. Appending them in call
+positionally, so `HookCmd` keeps `endpoints` of its own and `fenceState` keeps
+`name`, `meta`, `ex` and `trigger` in separate fields, assembled in `Do`. Appending them in call
 order made `.Within(…).Endpoint(…)` emit a malformed command. `TestHookAssembly`
 pins it. A trailing modifier on the fence area needs its own field for the same
 reason: appended to `geom`, a later `Get` silently overwrites it away.
