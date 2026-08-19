@@ -39,19 +39,28 @@ func (c *Client) Get(collection, id string) *GetCmd {
 }
 
 // Nearby starts building a Tile38 NEARBY query for the given collection.
-func (c *Client) Nearby(collection string) *NearbyCmd {
-	return &NearbyCmd{c: c, args: []any{"NEARBY", collection}}
+func (c *Client) Nearby(collection string) *NearbyCmd[string] {
+	return &NearbyCmd[string]{
+		searchState: &searchState{c: c, verb: "NEARBY", args: []any{"NEARBY", collection}},
+		out:         outIDs(),
+	}
 }
 
 // Scan starts building a Tile38 SCAN query for the given collection.
-func (c *Client) Scan(collection string) *ScanCmd {
-	return &ScanCmd{c: c, args: []any{"SCAN", collection}}
+func (c *Client) Scan(collection string) *ScanCmd[string] {
+	return &ScanCmd[string]{
+		searchState: &searchState{c: c, verb: "SCAN", args: []any{"SCAN", collection}},
+		out:         outIDs(),
+	}
 }
 
 // Search starts building a Tile38 SEARCH query, which matches on the string
 // values "SET … STRING" stores rather than on geometry.
-func (c *Client) Search(collection string) *SearchCmd {
-	return &SearchCmd{c: c, args: []any{"SEARCH", collection}}
+func (c *Client) Search(collection string) *SearchCmd[string] {
+	return &SearchCmd[string]{
+		searchState: &searchState{c: c, verb: "SEARCH", args: []any{"SEARCH", collection}},
+		out:         outIDs(),
+	}
 }
 
 // Test starts building a Tile38 TEST command comparing area against another,
@@ -61,13 +70,19 @@ func (c *Client) Test(area Area) *TestCmd {
 }
 
 // Within starts building a Tile38 WITHIN query for the given collection.
-func (c *Client) Within(collection string) *WithinCmd {
-	return &WithinCmd{c: c, args: []any{"WITHIN", collection}}
+func (c *Client) Within(collection string) *WithinCmd[string] {
+	return &WithinCmd[string]{
+		searchState: &searchState{c: c, verb: "WITHIN", args: []any{"WITHIN", collection}},
+		out:         outIDs(),
+	}
 }
 
 // Intersects starts building a Tile38 INTERSECTS query for the given collection.
-func (c *Client) Intersects(collection string) *IntersectsCmd {
-	return &IntersectsCmd{c: c, args: []any{"INTERSECTS", collection}}
+func (c *Client) Intersects(collection string) *IntersectsCmd[string] {
+	return &IntersectsCmd[string]{
+		searchState: &searchState{c: c, verb: "INTERSECTS", args: []any{"INTERSECTS", collection}},
+		out:         outIDs(),
+	}
 }
 
 // SetHook starts building a Tile38 SETHOOK command for the given hook name.

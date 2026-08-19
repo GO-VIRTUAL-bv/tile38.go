@@ -53,13 +53,16 @@ Method names mirror Tile38 keywords in Go casing (`Point`, `EX`, `Where`).
 
 ## Searches
 
-Verbs `Nearby`, `Within`, `Intersects`, `Scan`; terminals `IDs`, `Points`,
-`Count`, `Objects`, `Fence`; areas `Bounds`, `Circle`, `Object`, `Get`, `Tile`,
-`A5` (`Nearby` uses `Point().Radius()`). Filters `Where`/`WhereIn`/`Match`
-accumulate; `Limit`/`Cursor`/`Sparse`/`NoFields`/`Clip` overwrite.
+Verbs `Nearby`, `Within`, `Intersects`, `Scan`. A search ends in `Do(ctx)`, and
+an output format — `IDs`, `Points`, `Objects`, `Rects`, `Hashes`, `A5Cells` —
+decides what `Do` returns; omit it for IDs. `Count` and `Fence` are separate
+terminals. Areas `Bounds`, `Circle`, `Object`, `Get`, `Tile`, `A5` (`Nearby`
+uses `Point().Radius()`). Filters `Where`/`WhereIn`/`Match` accumulate;
+`Limit`/`Cursor`/`Sparse`/`NoFields`/`Clip` overwrite.
 
 ```go
-ids, err := c.Nearby("fleet").Where("speed > 40").Point(33.5, -115.5).Radius(5000).IDs(ctx)
+ids, err := c.Nearby("fleet").Where("speed > 40").Point(33.5, -115.5).Radius(5000).Do(ctx)
+pts, err := c.Nearby("fleet").Point(33.5, -115.5).Radius(5000).Points().Do(ctx)
 n, err   := c.Within("fleet").Bounds(33, -116, 34, -115).Count(ctx)
 ```
 
@@ -71,7 +74,7 @@ partial. Set an explicit `Limit` (or `Cursor`) to silence it, or page with
 `Cursor`/`NextCursor`.
 
 ```go
-ids, err := c.Scan("fleet").IDs(ctx)
+ids, err := c.Scan("fleet").Do(ctx)
 if errors.Is(err, tile38.ErrTruncated) {
     // ids holds the first 100; more match.
 }

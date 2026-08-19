@@ -86,10 +86,39 @@ it while callers still `errors.As` against the public name.
 
 **Builders** (`builders.go`, `intersects.go`, `channel.go`, `json.go`,
 `management.go`). Every command is a struct holding `args []any` plus a
-`*Client`. Chained methods append tokens; a terminal method (`Do`, `IDs`,
-`Points`, `Count`, `Objects`, `Fence`) sends them. Adding a command means:
-entry point in `commands.go`, builder type next to its siblings, parse helper
-in `parse.go` if the reply shape is new.
+`*Client`. Chained methods append tokens; a terminal method (`Do`, `Count`,
+`Fence`) sends them. Adding a command means: entry point in `commands.go`,
+builder type next to its siblings, parse helper in `parse.go` if the reply
+shape is new.
+
+**Search builders are generic over their result type.** `NearbyCmd[T]`,
+`WithinCmd[T]`, `IntersectsCmd[T]`, `ScanCmd[T]` and `SearchCmd[T]` all hold a
+shared `*searchState` plus a `searchOutput[T]`, and one `Do(ctx) ([]T, error)`
+serves every output format. An output-format method — `Points`, `Objects`,
+`Rects`, `Hashes`, `A5Cells`, `PointsWithDistance`, `Strings`, `IDs` — returns
+the *same builder at a different `T`*; a fresh command is `[string]` and emits
+`IDS`.
+
+The reason for the shape: a type parameter carries no behaviour at run time, so
+`searchOutput[T]` pairs the format's tokens with the parse func that decodes
+them. Without that pairing `Do` could not know how to decode `T`, and the
+alternative is one terminal per format per builder — 35 today, and 62 once
+paging is added.
+
+Methods cannot have type parameters in Go (`method must have no type
+parameters`; golang/go#49085 is open and unaccepted), which is why the parameter
+lives on the type. For the same reason the five search builders cannot share a
+base: a format switch would have to return "the same `Self` at a different `T`",
+and Go has no higher-kinded types — `Self[NearbyResult]` fails to typecheck. The
+`dupl` waiver in `.golangci.yml` records this.
+
+A format switch **clones** `searchState` rather than sharing the pointer, so two
+typed handles on one chain cannot mutate each other. `TestFormatSwitch` pins
+that, along with the default output, order-independence across the switch, and
+last-switch-wins.
+
+`Count` and `Fence` stay ordinary terminals: `COUNT` replies with a bare integer
+and no cursor, and `Fence` returns a `*Stream`. Neither fits `([]T, error)`.
 
 **Methods are named after Tile38 keywords**, in Go casing — `Point` not `At`,
 `EX` not `TTL`, `FSet`/`FGet` not `FSET`/`FGET`. Someone reading a chain should
@@ -146,10 +175,9 @@ order made `.Within(…).Endpoint(…)` emit a malformed command. `TestHookAssem
 pins it. A trailing modifier on the fence area needs its own field for the same
 reason: appended to `geom`, a later `Get` silently overwrites it away.
 
-`Detect`/`Commands` are rendered only by `Fence`, never by `IDs`/`Points`/
-`Count`/`Objects` — otherwise a stray `.Detect(…)` would turn a plain query
-into a live one on a pooled connection, and the caller would try to parse the
-`+OK` as results. `TestDetectIgnoredWithoutFence` pins that.
+`Detect`/`Commands` are rendered only by `Fence`, never by `Do` or `Count` —
+otherwise a stray `.Detect(…)` would turn a plain query into a live one on a
+pooled connection, and the caller would try to parse the `+OK` as results. `TestDetectIgnoredWithoutFence` pins that.
 
 **Transport** (`internal/conn`). `Pool.Do` takes a connection from an idle
 pool, writes one RESP array, reads one reply. The distinction that governs
@@ -193,9 +221,9 @@ Do not "correct" them back without re-testing.
   command carries no `LIMIT` (`limitItems`, `internal/server/scanner.go`). The
   reply's element 0 is a **cursor**, not a count: it is a resume offset when the
   scan hit the limit and `0` when it ran to completion. That makes a non-zero
-  cursor the truncation signal, which `parse.go` returns and the search
-  terminals turn into `ErrTruncated`. Discarding it is how a client silently
-  returns partial results once a collection grows past 100.
+  cursor the truncation signal, which `parse.go` returns and `searchDo` turns
+  into `ErrTruncated`. Discarding it is how a client silently returns partial
+  results once a collection grows past 100.
 - `COUNT` is exempt from that cap — the server sets `limit = MaxUint64` for it —
   and replies with a **bare integer**, not `[count, …]`. `parseCount`
   deliberately refuses the array form rather than reading the cursor as a count.

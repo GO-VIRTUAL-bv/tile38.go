@@ -245,7 +245,7 @@ func TestSearchOutputFormats(t *testing.T) {
 		}
 	}
 
-	ids, err := c.Nearby(key).Point(33.5, -115.5).Radius(5000).IDs(ctx)
+	ids, err := c.Nearby(key).Point(33.5, -115.5).Radius(5000).Do(ctx)
 	if err != nil {
 		t.Fatalf("nearby ids: %v", err)
 	}
@@ -253,7 +253,7 @@ func TestSearchOutputFormats(t *testing.T) {
 		t.Errorf("nearby ids = %v, want 2 results", ids)
 	}
 
-	pts, err := c.Nearby(key).Point(33.5, -115.5).Radius(5000).Points(ctx)
+	pts, err := c.Nearby(key).Point(33.5, -115.5).Radius(5000).Points().Do(ctx)
 	if err != nil {
 		t.Fatalf("nearby points: %v", err)
 	}
@@ -263,7 +263,7 @@ func TestSearchOutputFormats(t *testing.T) {
 
 	// DISTANCE is an option token, and the distance arrives after the optional
 	// fields array — both easy to get wrong.
-	withDist, err := c.Nearby(key).Point(33.5, -115.5).Radius(5000).PointsWithDistance(ctx)
+	withDist, err := c.Nearby(key).Point(33.5, -115.5).Radius(5000).PointsWithDistance().Do(ctx)
 	if err != nil {
 		t.Fatalf("nearby points with distance: %v", err)
 	}
@@ -289,7 +289,7 @@ func TestSearchOutputFormats(t *testing.T) {
 		t.Errorf("nearby count = %d, want 2", n)
 	}
 
-	objs, err := c.Nearby(key).Point(33.5, -115.5).Radius(5000).Objects(ctx)
+	objs, err := c.Nearby(key).Point(33.5, -115.5).Radius(5000).Objects().Do(ctx)
 	if err != nil {
 		t.Fatalf("nearby objects: %v", err)
 	}
@@ -312,21 +312,21 @@ func TestSearchOutputFormats(t *testing.T) {
 
 	// BOUNDS, HASHES and A5 are output formats the server supports on every
 	// search verb; BOUNDS and HASHES carry fields, A5 deliberately does not.
-	rects, err := c.Nearby(key).Point(33.5, -115.5).Radius(5000).Rects(ctx)
+	rects, err := c.Nearby(key).Point(33.5, -115.5).Radius(5000).Rects().Do(ctx)
 	if err != nil {
 		t.Fatalf("nearby rects: %v", err)
 	}
 	if len(rects) != 2 || rects[0].Bounds.SW[0] == 0 || rects[0].Fields["speed"] != "10" {
 		t.Errorf("nearby rects = %+v", rects)
 	}
-	hashes, err := c.Within(key).Bounds(GlobalBounds()).Hashes(ctx, 6)
+	hashes, err := c.Within(key).Bounds(GlobalBounds()).Hashes(6).Do(ctx)
 	if err != nil {
 		t.Fatalf("within hashes: %v", err)
 	}
 	if len(hashes) != 3 || len(hashes[0].Hash) != 6 || hashes[0].Fields["speed"] != "10" {
 		t.Errorf("within hashes = %+v", hashes)
 	}
-	cells, err := c.Scan(key).A5Cells(ctx, 8)
+	cells, err := c.Scan(key).A5Cells(8).Do(ctx)
 	if err != nil {
 		t.Fatalf("scan a5 cells: %v", err)
 	}
@@ -337,10 +337,10 @@ func TestSearchOutputFormats(t *testing.T) {
 	if n, err = c.Nearby(key).Limit(1).Point(33.5, -115.5).Radius(5000).Count(ctx); err != nil || n != 1 {
 		t.Errorf("nearby limit 1 count = %d, %v; want 1, nil", n, err)
 	}
-	if ids, err = c.Nearby(key).Where("speed > 5").Point(33.5, -115.5).Radius(5000).IDs(ctx); err != nil || len(ids) != 2 {
+	if ids, err = c.Nearby(key).Where("speed > 5").Point(33.5, -115.5).Radius(5000).Do(ctx); err != nil || len(ids) != 2 {
 		t.Errorf("nearby where = %v, %v; want 2 results", ids, err)
 	}
-	if ids, err = c.Nearby(key).Where("speed > 500").Point(33.5, -115.5).Radius(5000).IDs(ctx); err != nil || len(ids) != 0 {
+	if ids, err = c.Nearby(key).Where("speed > 500").Point(33.5, -115.5).Radius(5000).Do(ctx); err != nil || len(ids) != 0 {
 		t.Errorf("nearby where (no match) = %v, %v; want 0 results", ids, err)
 	}
 }
@@ -369,7 +369,7 @@ func TestWithinAndIntersects(t *testing.T) {
 		}
 	}
 
-	objs, err := c.Within(key).Object(`{"type":"Polygon","coordinates":[[[-116,33],[-115,33],[-115,34],[-116,34],[-116,33]]]}`).Objects(ctx)
+	objs, err := c.Within(key).Object(`{"type":"Polygon","coordinates":[[[-116,33],[-115,33],[-115,34],[-116,34],[-116,33]]]}`).Objects().Do(ctx)
 	if err != nil {
 		t.Fatalf("within object: %v", err)
 	}
@@ -380,7 +380,7 @@ func TestWithinAndIntersects(t *testing.T) {
 	if err := c.Set(key, "zone").Bounds(33, -116, 34, -115).Do(ctx); err != nil {
 		t.Fatalf("set zone: %v", err)
 	}
-	ids, err := c.Within(key).Get(key, "zone").IDs(ctx)
+	ids, err := c.Within(key).Get(key, "zone").Do(ctx)
 	if err != nil {
 		t.Fatalf("within get: %v", err)
 	}
@@ -399,7 +399,7 @@ func TestScan(t *testing.T) {
 		}
 	}
 
-	ids, err := c.Scan(key).IDs(ctx)
+	ids, err := c.Scan(key).Do(ctx)
 	if err != nil {
 		t.Fatalf("scan ids: %v", err)
 	}
@@ -407,7 +407,7 @@ func TestScan(t *testing.T) {
 		t.Errorf("scan ids = %v, want 3", ids)
 	}
 
-	if ids, err = c.Scan(key).Match("truck:*").IDs(ctx); err != nil || len(ids) != 2 {
+	if ids, err = c.Scan(key).Match("truck:*").Do(ctx); err != nil || len(ids) != 2 {
 		t.Errorf("scan match = %v, %v; want 2 results", ids, err)
 	}
 
@@ -416,7 +416,7 @@ func TestScan(t *testing.T) {
 		t.Errorf("scan count = %d, %v; want 3, nil", n, err)
 	}
 
-	pts, err := c.Scan(key).Points(ctx)
+	pts, err := c.Scan(key).Points().Do(ctx)
 	if err != nil || len(pts) != 3 {
 		t.Errorf("scan points = %+v, %v; want 3 results", pts, err)
 	}
@@ -447,7 +447,7 @@ func TestPointZ(t *testing.T) {
 		t.Errorf("get 2d point z = %v, %v; want 0", z, err)
 	}
 
-	pts, err := c.Scan(key).Points(ctx)
+	pts, err := c.Scan(key).Points().Do(ctx)
 	if err != nil {
 		t.Fatalf("scan points: %v", err)
 	}
@@ -474,7 +474,7 @@ func TestPointZ(t *testing.T) {
 
 	// The z lives inside the coordinate array, so the trailing distance must not
 	// be read as one or vice versa.
-	withDist, err := c.Nearby(key).Point(33.5, -115.5).Radius(100000).PointsWithDistance(ctx)
+	withDist, err := c.Nearby(key).Point(33.5, -115.5).Radius(100000).PointsWithDistance().Do(ctx)
 	if err != nil {
 		t.Fatalf("points with distance: %v", err)
 	}
@@ -504,11 +504,11 @@ func TestOptionsAndAreas(t *testing.T) {
 
 	// SCAN is the only search verb that takes an order; NEARBY answers
 	// "DESC is not allowed for NEARBY".
-	asc, err := c.Scan(key).Asc().IDs(ctx)
+	asc, err := c.Scan(key).Asc().Do(ctx)
 	if err != nil {
 		t.Fatalf("scan asc: %v", err)
 	}
-	desc, err := c.Scan(key).Desc().IDs(ctx)
+	desc, err := c.Scan(key).Desc().Do(ctx)
 	if err != nil {
 		t.Fatalf("scan desc: %v", err)
 	}
@@ -516,7 +516,7 @@ func TestOptionsAndAreas(t *testing.T) {
 		t.Errorf("asc = %v, desc = %v; want a-first and b-first", asc, desc)
 	}
 
-	ids, err := c.Scan(key).WhereEval("return FIELDS.speed > tonumber(ARGV[1])", 15).IDs(ctx)
+	ids, err := c.Scan(key).WhereEval("return FIELDS.speed > tonumber(ARGV[1])", 15).Do(ctx)
 	if err != nil {
 		t.Fatalf("whereeval: %v", err)
 	}
@@ -592,7 +592,7 @@ func TestA5AndTileAreas(t *testing.T) {
 		t.Fatal("get a5 returned an empty cell id")
 	}
 
-	ids, err := c.Within(key).A5(cell).IDs(ctx)
+	ids, err := c.Within(key).A5(cell).Do(ctx)
 	if err != nil {
 		t.Fatalf("within a5: %v", err)
 	}
@@ -600,12 +600,12 @@ func TestA5AndTileAreas(t *testing.T) {
 		t.Errorf("within a5 = %v, want [p1]", ids)
 	}
 
-	if ids, err = c.Intersects(key).A5(cell).IDs(ctx); err != nil || len(ids) != 1 {
+	if ids, err = c.Intersects(key).A5(cell).Do(ctx); err != nil || len(ids) != 1 {
 		t.Errorf("intersects a5 = %v, %v; want [p1]", ids, err)
 	}
 
 	// Tile 0/0/0 covers the whole world.
-	if ids, err = c.Within(key).Tile(0, 0, 0).IDs(ctx); err != nil || len(ids) != 1 {
+	if ids, err = c.Within(key).Tile(0, 0, 0).Do(ctx); err != nil || len(ids) != 1 {
 		t.Errorf("within tile 0/0/0 = %v, %v; want [p1]", ids, err)
 	}
 }
@@ -623,7 +623,7 @@ func TestSearchStringsAndFExists(t *testing.T) {
 		t.Fatalf("set string: %v", err)
 	}
 
-	res, err := c.Search(key).Match("*hello*").Strings(ctx)
+	res, err := c.Search(key).Match("*hello*").Strings().Do(ctx)
 	if err != nil {
 		t.Fatalf("search: %v", err)
 	}
@@ -637,7 +637,7 @@ func TestSearchStringsAndFExists(t *testing.T) {
 		t.Errorf("search count = %d, %v; want 2", n, err)
 	}
 	// SEARCH is the other verb that takes an order.
-	desc, err := c.Search(key).Desc().IDs(ctx)
+	desc, err := c.Search(key).Desc().Do(ctx)
 	if err != nil || len(desc) != 2 || desc[0] != "note1" {
 		t.Errorf("search desc = %v, %v; want note1 first", desc, err)
 	}
@@ -727,7 +727,7 @@ func TestRenamePDelDrop(t *testing.T) {
 	if err := c.PDel(key, "truck:*").Do(ctx); err != nil {
 		t.Fatalf("pdel: %v", err)
 	}
-	ids, _ := c.Scan(key).IDs(ctx)
+	ids, _ := c.Scan(key).Do(ctx)
 	if len(ids) != 1 {
 		t.Errorf("ids after pdel = %v, want 1", ids)
 	}
@@ -737,7 +737,7 @@ func TestRenamePDelDrop(t *testing.T) {
 	if err := c.Rename(key, renamed).Do(ctx); err != nil {
 		t.Fatalf("rename: %v", err)
 	}
-	if ids, _ = c.Scan(renamed).IDs(ctx); len(ids) != 1 {
+	if ids, _ = c.Scan(renamed).Do(ctx); len(ids) != 1 {
 		t.Errorf("ids after rename = %v, want 1", ids)
 	}
 
@@ -828,7 +828,7 @@ func TestSearchTruncationAndPaging(t *testing.T) {
 
 	// A plain scan stops at the server's default of 100 and says so.
 	first := c.Scan(key)
-	ids, err := first.IDs(ctx)
+	ids, err := first.Do(ctx)
 	if !errors.Is(err, ErrTruncated) {
 		t.Fatalf("IDs = %v, want ErrTruncated", err)
 	}
@@ -846,7 +846,7 @@ func TestSearchTruncationAndPaging(t *testing.T) {
 	}
 	for cursor := first.NextCursor(); ; {
 		page := c.Scan(key).Cursor(cursor)
-		pageIDs, err := page.IDs(ctx)
+		pageIDs, err := page.Do(ctx)
 		if err != nil {
 			t.Fatalf("page at cursor %d: %v", cursor, err)
 		}
@@ -865,11 +865,11 @@ func TestSearchTruncationAndPaging(t *testing.T) {
 	}
 
 	// An explicit limit is the caller's own bound, so it is not an error.
-	if _, err := c.Scan(key).Limit(10).IDs(ctx); err != nil {
+	if _, err := c.Scan(key).Limit(10).Do(ctx); err != nil {
 		t.Errorf("Limit(10): %v", err)
 	}
 	// A limit above the collection size runs to completion.
-	all, err := c.Scan(key).Limit(n * 2).IDs(ctx)
+	all, err := c.Scan(key).Limit(n * 2).Do(ctx)
 	if err != nil {
 		t.Errorf("Limit(%d): %v", n*2, err)
 	}

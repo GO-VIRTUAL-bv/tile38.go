@@ -120,7 +120,7 @@ func TestNearbyPoints(t *testing.T) {
 	c := New(addr)
 	defer c.Close()
 
-	res, err := c.Nearby("fleet").Limit(10).Point(33.5, -115.5).Radius(5000).Points(t.Context())
+	res, err := c.Nearby("fleet").Limit(10).Point(33.5, -115.5).Radius(5000).Points().Do(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,17 +173,17 @@ func TestChainOrderIsIrrelevant(t *testing.T) {
 	// options in the order given, then LIMIT, then the format, then the geometry.
 	want := []string{"NEARBY", "fleet", "WHERE", "speed > 5", "LIMIT", "10", "POINTS", "POINT", "33.5", "-115.5", "5000"}
 
-	orders := map[string]func(*Client) *NearbyCmd{
-		"options first": func(c *Client) *NearbyCmd {
+	orders := map[string]func(*Client) *NearbyCmd[string]{
+		"options first": func(c *Client) *NearbyCmd[string] {
 			return c.Nearby("fleet").Limit(10).Where("speed > 5").Point(33.5, -115.5).Radius(5000)
 		},
-		"options last": func(c *Client) *NearbyCmd {
+		"options last": func(c *Client) *NearbyCmd[string] {
 			return c.Nearby("fleet").Point(33.5, -115.5).Radius(5000).Limit(10).Where("speed > 5")
 		},
-		"interleaved": func(c *Client) *NearbyCmd {
+		"interleaved": func(c *Client) *NearbyCmd[string] {
 			return c.Nearby("fleet").Point(33.5, -115.5).Limit(10).Radius(5000).Where("speed > 5")
 		},
-		"radius before at": func(c *Client) *NearbyCmd {
+		"radius before at": func(c *Client) *NearbyCmd[string] {
 			return c.Nearby("fleet").Radius(5000).Limit(10).Point(33.5, -115.5).Where("speed > 5")
 		},
 	}
@@ -198,7 +198,7 @@ func TestChainOrderIsIrrelevant(t *testing.T) {
 			c := New(addr)
 			defer c.Close()
 
-			if _, err := build(c).Points(t.Context()); err != nil {
+			if _, err := build(c).Points().Do(t.Context()); err != nil {
 				t.Fatal(err)
 			}
 			if cmd := <-got; !reflect.DeepEqual(cmd, want) {
@@ -206,6 +206,83 @@ func TestChainOrderIsIrrelevant(t *testing.T) {
 			}
 		})
 	}
+}
+
+// captureSearch runs one search against a scripted empty reply and returns the
+// command the client sent.
+func captureSearch(t *testing.T, run func(c *Client) error) []string {
+	t.Helper()
+	got := make(chan []string, 1)
+	addr := fakeServer(t, func(r *bufio.Reader, w net.Conn) {
+		got <- readCommand(t, r)
+		_, _ = io.WriteString(w, wire("*2", ":0", "*0"))
+	})
+	c := New(addr)
+	defer c.Close()
+	if err := run(c); err != nil {
+		t.Fatal(err)
+	}
+	return <-got
+}
+
+// The output format lives on the builder's type parameter rather than in the
+// terminal's name, so a format switch has to carry the chain across unchanged
+// and stay indifferent to where in the chain it was called.
+func TestFormatSwitch(t *testing.T) {
+	t.Run("default output is IDS", func(t *testing.T) {
+		got := captureSearch(t, func(c *Client) error {
+			_, err := c.Nearby("fleet").Point(33.5, -115.5).Radius(5000).Do(t.Context())
+			return err
+		})
+		want := []string{"NEARBY", "fleet", "IDS", "POINT", "33.5", "-115.5", "5000"}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("command = %q,\n           want %q", got, want)
+		}
+	})
+
+	t.Run("options either side of the switch", func(t *testing.T) {
+		before := captureSearch(t, func(c *Client) error {
+			_, err := c.Nearby("fleet").Limit(10).Points().Where("speed > 5").
+				Point(33.5, -115.5).Radius(5000).Do(t.Context())
+			return err
+		})
+		after := captureSearch(t, func(c *Client) error {
+			_, err := c.Nearby("fleet").Where("speed > 5").Point(33.5, -115.5).
+				Radius(5000).Limit(10).Points().Do(t.Context())
+			return err
+		})
+		if !reflect.DeepEqual(before, after) {
+			t.Errorf("switching mid-chain changed the command:\n got %q\nwant %q", before, after)
+		}
+	})
+
+	t.Run("the last switch wins", func(t *testing.T) {
+		got := captureSearch(t, func(c *Client) error {
+			_, err := c.Scan("fleet").Points().Objects().Do(t.Context())
+			return err
+		})
+		want := []string{"SCAN", "fleet", "OBJECTS"}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("command = %q,\n           want %q", got, want)
+		}
+	})
+
+	// A switch clones the chain. Sharing it by pointer would let two typed
+	// handles on one command mutate each other, which is a bug the older
+	// terminals could not have, because a format was never a value you held.
+	t.Run("the switch clones the chain", func(t *testing.T) {
+		got := captureSearch(t, func(c *Client) error {
+			base := c.Nearby("fleet").Point(33.5, -115.5).Radius(5000)
+			points := base.Points()
+			base.Where("speed > 5").Limit(3) // must not reach points
+			_, err := points.Do(t.Context())
+			return err
+		})
+		want := []string{"NEARBY", "fleet", "POINTS", "POINT", "33.5", "-115.5", "5000"}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("command = %q,\n           want %q", got, want)
+		}
+	})
 }
 
 // Tile38 rejects a repeated LIMIT/DETECT/COMMANDS, so calling those twice must
@@ -219,7 +296,7 @@ func TestRepeatedOptions(t *testing.T) {
 		"limit twice keeps the last": {
 			build: func(c *Client) error {
 				_, err := c.Nearby("fleet").Limit(1).Limit(5).
-					Point(33.5, -115.5).Radius(500).IDs(t.Context())
+					Point(33.5, -115.5).Radius(500).Do(t.Context())
 				return err
 			},
 			want: []string{"NEARBY", "fleet", "LIMIT", "5", "IDS", "POINT", "33.5", "-115.5", "500"},
@@ -237,7 +314,7 @@ func TestRepeatedOptions(t *testing.T) {
 		},
 		"scan renders its limit": {
 			build: func(c *Client) error {
-				_, err := c.Scan("fleet").Limit(50).IDs(t.Context())
+				_, err := c.Scan("fleet").Limit(50).Do(t.Context())
 				return err
 			},
 			want: []string{"SCAN", "fleet", "LIMIT", "50", "IDS"},
@@ -245,7 +322,7 @@ func TestRepeatedOptions(t *testing.T) {
 		"single-use flags render once": {
 			build: func(c *Client) error {
 				_, err := c.Within("fleet").NoFields().NoFields().Clip().
-					Sparse(2).Sparse(4).Bounds(GlobalBounds()).Objects(t.Context())
+					Sparse(2).Sparse(4).Bounds(GlobalBounds()).Objects().Do(t.Context())
 				return err
 			},
 			want: []string{"WITHIN", "fleet", "SPARSE", "4", "NOFIELDS", "CLIP",
@@ -255,7 +332,7 @@ func TestRepeatedOptions(t *testing.T) {
 			build: func(c *Client) error {
 				_, err := c.Scan("fleet").
 					WhereIn("kind", "truck", "van").
-					WhereIn("zone", 1, 2, 3).IDs(t.Context())
+					WhereIn("zone", 1, 2, 3).Do(t.Context())
 				return err
 			},
 			want: []string{"SCAN", "fleet",
@@ -266,7 +343,7 @@ func TestRepeatedOptions(t *testing.T) {
 			build: func(c *Client) error {
 				_, err := c.Scan("fleet").
 					Where("speed > 5").Where("fuel < 50").
-					Match("truck:*").Match("van:*").IDs(t.Context())
+					Match("truck:*").Match("van:*").Do(t.Context())
 				return err
 			},
 			want: []string{"SCAN", "fleet", "WHERE", "speed > 5", "WHERE", "fuel < 50",
@@ -514,32 +591,32 @@ func TestSearchTruncation(t *testing.T) {
 
 	tests := map[string]struct {
 		reply      string
-		build      func(*Client) *ScanCmd
+		build      func(*Client) *ScanCmd[string]
 		wantErr    bool
 		wantCursor uint64
 		wantCmd    []string
 	}{
 		"non-zero cursor without a limit reports truncation": {
 			reply:      truncated,
-			build:      func(c *Client) *ScanCmd { return c.Scan("fleet") },
+			build:      func(c *Client) *ScanCmd[string] { return c.Scan("fleet") },
 			wantErr:    true,
 			wantCursor: 2,
 			wantCmd:    []string{"SCAN", "fleet", "IDS"},
 		},
 		"zero cursor is a complete result": {
 			reply:   complete,
-			build:   func(c *Client) *ScanCmd { return c.Scan("fleet") },
+			build:   func(c *Client) *ScanCmd[string] { return c.Scan("fleet") },
 			wantCmd: []string{"SCAN", "fleet", "IDS"},
 		},
 		"an explicit limit means the cap was asked for": {
 			reply:      truncated,
-			build:      func(c *Client) *ScanCmd { return c.Scan("fleet").Limit(2) },
+			build:      func(c *Client) *ScanCmd[string] { return c.Scan("fleet").Limit(2) },
 			wantCursor: 2,
 			wantCmd:    []string{"SCAN", "fleet", "LIMIT", "2", "IDS"},
 		},
 		"paging with a cursor is deliberate": {
 			reply:      truncated,
-			build:      func(c *Client) *ScanCmd { return c.Scan("fleet").Cursor(100) },
+			build:      func(c *Client) *ScanCmd[string] { return c.Scan("fleet").Cursor(100) },
 			wantCursor: 2,
 			wantCmd:    []string{"SCAN", "fleet", "CURSOR", "100", "IDS"},
 		},
@@ -556,7 +633,7 @@ func TestSearchTruncation(t *testing.T) {
 			defer c.Close()
 
 			cmd := tc.build(c)
-			ids, err := cmd.IDs(t.Context())
+			ids, err := cmd.Do(t.Context())
 			if tc.wantErr != errors.Is(err, ErrTruncated) {
 				t.Errorf("err = %v, want ErrTruncated: %v", err, tc.wantErr)
 			}
@@ -858,7 +935,7 @@ func TestObjectsDecodeFields(t *testing.T) {
 			c := New(addr)
 			defer c.Close()
 
-			objs, err := c.Scan("fleet").Objects(t.Context())
+			objs, err := c.Scan("fleet").Objects().Do(t.Context())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -891,7 +968,7 @@ func TestPointsDecodeFields(t *testing.T) {
 		c := New(addr)
 		defer c.Close()
 
-		res, err := c.Nearby("fleet").Point(51.2, 4.4).Radius(100).Points(t.Context())
+		res, err := c.Nearby("fleet").Point(51.2, 4.4).Radius(100).Points().Do(t.Context())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -909,7 +986,7 @@ func TestPointsDecodeFields(t *testing.T) {
 		c := New(addr)
 		defer c.Close()
 
-		res, err := c.Nearby("fleet").Point(51.2, 4.4).Radius(100).PointsWithDistance(t.Context())
+		res, err := c.Nearby("fleet").Point(51.2, 4.4).Radius(100).PointsWithDistance().Do(t.Context())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -932,7 +1009,7 @@ func TestPointsDecodeFields(t *testing.T) {
 		c := New(addr)
 		defer c.Close()
 
-		res, err := c.Nearby("fleet").Point(51.2, 4.4).Radius(100).PointsWithDistance(t.Context())
+		res, err := c.Nearby("fleet").Point(51.2, 4.4).Radius(100).PointsWithDistance().Do(t.Context())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -980,7 +1057,7 @@ func TestPointsDecodeZ(t *testing.T) {
 		c := New(addr)
 		defer c.Close()
 
-		res, err := c.Scan("fleet").Points(t.Context())
+		res, err := c.Scan("fleet").Points().Do(t.Context())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1004,7 +1081,7 @@ func TestPointsDecodeZ(t *testing.T) {
 		c := New(addr)
 		defer c.Close()
 
-		res, err := c.Nearby("fleet").Point(1, 2).Radius(3).PointsWithDistance(t.Context())
+		res, err := c.Nearby("fleet").Point(1, 2).Radius(3).PointsWithDistance().Do(t.Context())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1128,28 +1205,28 @@ func TestOutputFormatTokenOrder(t *testing.T) {
 	}{
 		"bounds": {
 			run: func(c *Client) error {
-				_, err := c.Nearby("fleet").Limit(5).Point(33.5, -115.5).Radius(100).Rects(t.Context())
+				_, err := c.Nearby("fleet").Limit(5).Point(33.5, -115.5).Radius(100).Rects().Do(t.Context())
 				return err
 			},
 			want: []string{"NEARBY", "fleet", "LIMIT", "5", "BOUNDS", "POINT", "33.5", "-115.5", "100"},
 		},
 		"hashes": {
 			run: func(c *Client) error {
-				_, err := c.Within("fleet").Bounds(GlobalBounds()).Hashes(t.Context(), 6)
+				_, err := c.Within("fleet").Bounds(GlobalBounds()).Hashes(6).Do(t.Context())
 				return err
 			},
 			want: []string{"WITHIN", "fleet", "HASHES", "6", "BOUNDS", "-90", "-180", "90", "180"},
 		},
 		"a5": {
 			run: func(c *Client) error {
-				_, err := c.Intersects("fleet").Circle(1, 2, 3).A5Cells(t.Context(), 8)
+				_, err := c.Intersects("fleet").Circle(1, 2, 3).A5Cells(8).Do(t.Context())
 				return err
 			},
 			want: []string{"INTERSECTS", "fleet", "A5", "8", "CIRCLE", "1", "2", "3"},
 		},
 		"scan bounds": {
 			run: func(c *Client) error {
-				_, err := c.Scan("fleet").Match("truck:*").Rects(t.Context())
+				_, err := c.Scan("fleet").Match("truck:*").Rects().Do(t.Context())
 				return err
 			},
 			want: []string{"SCAN", "fleet", "MATCH", "truck:*", "BOUNDS"},
@@ -1191,7 +1268,7 @@ func TestOutputFormatDecoding(t *testing.T) {
 		c := New(addr)
 		defer c.Close()
 
-		res, err := c.Scan("fleet").Rects(t.Context())
+		res, err := c.Scan("fleet").Rects().Do(t.Context())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1214,7 +1291,7 @@ func TestOutputFormatDecoding(t *testing.T) {
 		c := New(addr)
 		defer c.Close()
 
-		res, err := c.Scan("fleet").Hashes(t.Context(), 6)
+		res, err := c.Scan("fleet").Hashes(6).Do(t.Context())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1233,7 +1310,7 @@ func TestOutputFormatDecoding(t *testing.T) {
 		c := New(addr)
 		defer c.Close()
 
-		res, err := c.Scan("fleet").A5Cells(t.Context(), 8)
+		res, err := c.Scan("fleet").A5Cells(8).Do(t.Context())
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1255,14 +1332,14 @@ func TestOptionAndAreaTokens(t *testing.T) {
 		// ASC and DESC overwrite: Tile38 rejects a command carrying both.
 		"scan order overwrites": {
 			run: func(c *Client) error {
-				_, err := c.Scan("fleet").Desc().Asc().Desc().IDs(t.Context())
+				_, err := c.Scan("fleet").Desc().Asc().Desc().Do(t.Context())
 				return err
 			},
 			want: []string{"SCAN", "fleet", "DESC", "IDS"},
 		},
 		"whereeval is length prefixed": {
 			run: func(c *Client) error {
-				_, err := c.Scan("fleet").WhereEval("return FIELDS.speed > tonumber(ARGV[1])", 15).IDs(t.Context())
+				_, err := c.Scan("fleet").WhereEval("return FIELDS.speed > tonumber(ARGV[1])", 15).Do(t.Context())
 				return err
 			},
 			want: []string{"SCAN", "fleet", "WHEREEVAL",
@@ -1271,7 +1348,7 @@ func TestOptionAndAreaTokens(t *testing.T) {
 		"whereevalsha accumulates": {
 			run: func(c *Client) error {
 				_, err := c.Within("fleet").WhereEvalSha("abc", 1).WhereEvalSha("def").
-					Bounds(GlobalBounds()).IDs(t.Context())
+					Bounds(GlobalBounds()).Do(t.Context())
 				return err
 			},
 			want: []string{"WITHIN", "fleet", "WHEREEVALSHA", "abc", "1", "1",
@@ -1279,14 +1356,14 @@ func TestOptionAndAreaTokens(t *testing.T) {
 		},
 		"buffer precedes the output format": {
 			run: func(c *Client) error {
-				_, err := c.Intersects("fleet").Buffer(500).Circle(1, 2, 3).IDs(t.Context())
+				_, err := c.Intersects("fleet").Buffer(500).Circle(1, 2, 3).Do(t.Context())
 				return err
 			},
 			want: []string{"INTERSECTS", "fleet", "BUFFER", "500", "IDS", "CIRCLE", "1", "2", "3"},
 		},
 		"sector area": {
 			run: func(c *Client) error {
-				_, err := c.Within("fleet").Sector(33.5, -115.5, 5000, 0, 90).IDs(t.Context())
+				_, err := c.Within("fleet").Sector(33.5, -115.5, 5000, 0, 90).Do(t.Context())
 				return err
 			},
 			want: []string{"WITHIN", "fleet", "IDS", "SECTOR", "33.5", "-115.5", "5000", "0", "90"},
@@ -1343,7 +1420,7 @@ func TestDistanceOnlyOnFence(t *testing.T) {
 	}{
 		"ignored without fence": {
 			run: func(c *Client) error {
-				_, err := c.Nearby("fleet").Distance().Point(1, 2).Radius(3).Points(t.Context())
+				_, err := c.Nearby("fleet").Distance().Point(1, 2).Radius(3).Points().Do(t.Context())
 				return err
 			},
 			want: []string{"NEARBY", "fleet", "POINTS", "POINT", "1", "2", "3"},
@@ -1460,7 +1537,7 @@ func TestSearchStrings(t *testing.T) {
 	c := New(addr)
 	defer c.Close()
 
-	res, err := c.Search("notes").Match("*hello*").Asc().Strings(t.Context())
+	res, err := c.Search("notes").Match("*hello*").Asc().Strings().Do(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
