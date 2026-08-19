@@ -39,24 +39,20 @@ const DefaultTimeout = conn.DefaultTimeout
 // collection therefore starts silently dropping results as that collection
 // grows, which is what this error exists to prevent.
 //
-// The results returned alongside it are valid, just incomplete. Either page
-// through the rest with Cursor and NextCursor:
+// The results returned alongside it are valid, just incomplete. To take
+// everything, range Iter instead of calling Do — it follows the cursor itself
+// and never reports this error:
 //
-//	cmd := c.Scan("fleet")
-//	for {
-//		ids, err := cmd.Do(ctx)
-//		if err != nil && !errors.Is(err, ErrTruncated) {
+//	for id, err := range c.Scan("fleet").Iter(ctx) {
+//		if err != nil {
 //			return err
 //		}
-//		use(ids)
-//		if !errors.Is(err, ErrTruncated) {
-//			break
-//		}
-//		cmd = c.Scan("fleet").Cursor(cmd.NextCursor())
+//		use(id)
 //	}
 //
-// or set an explicit Limit to say the cap is intended — an explicit Limit or
-// Cursor silences this error, since then the bound is the caller's own.
+// Cursor and NextCursor are still there for driving the paging by hand. Or set
+// an explicit Limit to say the cap is intended — an explicit Limit or Cursor
+// silences this error, since then the bound is the caller's own.
 var ErrTruncated = errors.New("tile38: result truncated, more objects match")
 
 // Option configures a Client. Pass any number of them to New.

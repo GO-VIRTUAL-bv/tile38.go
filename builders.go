@@ -6,7 +6,9 @@ package tile38
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"iter"
 	"slices"
 	"strconv"
 	"strings"
@@ -259,6 +261,45 @@ func searchDo[E any](ctx context.Context, s *searchState, f format[E]) ([]E, err
 	}
 	s.cursorOut = cursor
 	return res, truncation(s.opts, cursor)
+}
+
+// searchIter pages a search to completion, yielding one item at a time so the
+// caller never sees a page boundary. Truncation is its loop condition rather
+// than an error, so it never yields ErrTruncated.
+//
+// An explicit Limit or Cursor is the caller's own bound, so it yields that one
+// page and stops — the same reasoning that keeps truncation silent there.
+//
+// The cursor is driven on searchState and restored when the range ends, so a
+// second Iter on the same builder starts over rather than resuming mid-scan, and
+// an early break leaves the builder as it found it. Breaking out simply stops
+// asking for pages: each one is an ordinary pooled round trip, with no
+// connection held open between them.
+func searchIter[E any](ctx context.Context, s *searchState, f format[E]) iter.Seq2[E, error] {
+	return func(yield func(E, error) bool) {
+		start := s.opts.cursor
+		bounded := s.opts.limit != nil || start != nil
+		defer func() { s.opts.cursor = start }()
+
+		for {
+			items, err := searchDo(ctx, s, f)
+			if err != nil && !errors.Is(err, ErrTruncated) {
+				var zero E
+				yield(zero, err)
+				return
+			}
+			for _, item := range items {
+				if !yield(item, nil) {
+					return
+				}
+			}
+			if bounded || s.cursorOut == 0 {
+				return
+			}
+			next := s.cursorOut
+			s.opts.cursor = &next
+		}
+	}
 }
 
 // searchCount runs the COUNT form, which is a terminal rather than an output
@@ -779,6 +820,24 @@ func (cmd *NearbyCmd[E]) Do(ctx context.Context) ([]E, error) {
 	return searchDo(ctx, cmd.searchState, cmd.out)
 }
 
+// Iter pages the search to completion, yielding one result at a time in whichever
+// output format was selected. It never reports ErrTruncated: following the
+// cursor is what it does instead.
+//
+//	for obj, err := range cmd.Objects().Iter(ctx) {
+//		if err != nil {
+//			return err
+//		}
+//		use(obj)
+//	}
+//
+// An explicit Limit or Cursor is the caller's own bound, so Iter yields that one
+// page rather than paging past it. Breaking out of the range just stops asking
+// for pages; nothing is left open.
+func (cmd *NearbyCmd[E]) Iter(ctx context.Context) iter.Seq2[E, error] {
+	return searchIter(ctx, cmd.searchState, cmd.out)
+}
+
 // Count runs the COUNT form: NEARBY collection [opts] COUNT POINT lat lon radius.
 // It returns the number of matching objects.
 //
@@ -923,6 +982,24 @@ func (cmd *ScanCmd[E]) Do(ctx context.Context) ([]E, error) {
 	return searchDo(ctx, cmd.searchState, cmd.out)
 }
 
+// Iter pages the scan to completion, yielding one result at a time in whichever
+// output format was selected. It never reports ErrTruncated: following the
+// cursor is what it does instead.
+//
+//	for obj, err := range cmd.Objects().Iter(ctx) {
+//		if err != nil {
+//			return err
+//		}
+//		use(obj)
+//	}
+//
+// An explicit Limit or Cursor is the caller's own bound, so Iter yields that one
+// page rather than paging past it. Breaking out of the range just stops asking
+// for pages; nothing is left open.
+func (cmd *ScanCmd[E]) Iter(ctx context.Context) iter.Seq2[E, error] {
+	return searchIter(ctx, cmd.searchState, cmd.out)
+}
+
 // Count runs the COUNT form: SCAN collection [opts] COUNT.
 // It returns the number of matching objects.
 //
@@ -1033,6 +1110,24 @@ func (cmd *SearchCmd[E]) Strings() *SearchCmd[StringObject] {
 // to IDS. It reports ErrTruncated when Tile38 capped an unbounded search.
 func (cmd *SearchCmd[E]) Do(ctx context.Context) ([]E, error) {
 	return searchDo(ctx, cmd.searchState, cmd.out)
+}
+
+// Iter pages the search to completion, yielding one result at a time in whichever
+// output format was selected. It never reports ErrTruncated: following the
+// cursor is what it does instead.
+//
+//	for obj, err := range cmd.Objects().Iter(ctx) {
+//		if err != nil {
+//			return err
+//		}
+//		use(obj)
+//	}
+//
+// An explicit Limit or Cursor is the caller's own bound, so Iter yields that one
+// page rather than paging past it. Breaking out of the range just stops asking
+// for pages; nothing is left open.
+func (cmd *SearchCmd[E]) Iter(ctx context.Context) iter.Seq2[E, error] {
+	return searchIter(ctx, cmd.searchState, cmd.out)
 }
 
 // Count runs the COUNT form: SEARCH collection [opts] COUNT.
@@ -1281,6 +1376,24 @@ func (cmd *WithinCmd[E]) A5Cells(level int) *WithinCmd[A5Result] {
 // to IDS. It reports ErrTruncated when Tile38 capped an unbounded search.
 func (cmd *WithinCmd[E]) Do(ctx context.Context) ([]E, error) {
 	return searchDo(ctx, cmd.searchState, cmd.out)
+}
+
+// Iter pages the search to completion, yielding one result at a time in whichever
+// output format was selected. It never reports ErrTruncated: following the
+// cursor is what it does instead.
+//
+//	for obj, err := range cmd.Objects().Iter(ctx) {
+//		if err != nil {
+//			return err
+//		}
+//		use(obj)
+//	}
+//
+// An explicit Limit or Cursor is the caller's own bound, so Iter yields that one
+// page rather than paging past it. Breaking out of the range just stops asking
+// for pages; nothing is left open.
+func (cmd *WithinCmd[E]) Iter(ctx context.Context) iter.Seq2[E, error] {
+	return searchIter(ctx, cmd.searchState, cmd.out)
 }
 
 // Count runs the COUNT form: WITHIN collection [opts] COUNT <area>.

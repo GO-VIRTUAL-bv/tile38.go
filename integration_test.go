@@ -864,9 +864,52 @@ func TestSearchTruncationAndPaging(t *testing.T) {
 		t.Errorf("paged over %d ids, want %d", len(seen), n)
 	}
 
+	// Iter does that paging itself, over the same three pages, and reports no
+	// truncation because following the cursor is what it does instead.
+	iterated := map[string]bool{}
+	for id, err := range c.Scan(key).Iter(ctx) {
+		if err != nil {
+			t.Fatalf("Iter: %v", err)
+		}
+		if iterated[id] {
+			t.Errorf("Iter returned %q twice", id)
+		}
+		iterated[id] = true
+	}
+	if len(iterated) != n {
+		t.Errorf("Iter saw %d ids, want %d", len(iterated), n)
+	}
+
+	// Breaking out early stops at the first page rather than draining the scan,
+	// and leaves the client usable.
+	partial := 0
+	for range c.Scan(key).Iter(ctx) {
+		partial++
+		if partial == 3 {
+			break
+		}
+	}
+	if partial != 3 {
+		t.Errorf("broke out after %d ids, want 3", partial)
+	}
+	if err := c.Ping(ctx); err != nil {
+		t.Errorf("ping after an abandoned Iter: %v", err)
+	}
+
 	// An explicit limit is the caller's own bound, so it is not an error.
 	if _, err := c.Scan(key).Limit(10).Do(ctx); err != nil {
 		t.Errorf("Limit(10): %v", err)
+	}
+	// It bounds Iter the same way: one page, not the whole collection.
+	bounded := 0
+	for _, err := range c.Scan(key).Limit(10).Iter(ctx) {
+		if err != nil {
+			t.Fatalf("Iter with a limit: %v", err)
+		}
+		bounded++
+	}
+	if bounded != 10 {
+		t.Errorf("Iter with Limit(10) saw %d ids, want 10", bounded)
 	}
 	// A limit above the collection size runs to completion.
 	all, err := c.Scan(key).Limit(n * 2).Do(ctx)

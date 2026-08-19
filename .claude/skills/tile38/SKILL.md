@@ -70,8 +70,22 @@ n, err   := c.Within("fleet").Bounds(33, -116, 34, -115).Count(ctx)
 
 **Tile38 caps every search except `Count` at 100 results when no `Limit` is set.**
 The client surfaces this as `tile38.ErrTruncated`; returned results are valid but
-partial. Set an explicit `Limit` (or `Cursor`) to silence it, or page with
-`Cursor`/`NextCursor`.
+partial.
+
+Range `Iter(ctx)` instead of calling `Do` to take everything — it pages itself,
+yields one result at a time, and never reports `ErrTruncated`:
+
+```go
+for id, err := range c.Scan("fleet").Iter(ctx) {
+	if err != nil {
+		return err
+	}
+	use(id)
+}
+```
+
+Otherwise set an explicit `Limit` (or `Cursor`) to silence it — which also bounds
+`Iter` to that one page — or page by hand with `Cursor`/`NextCursor`.
 
 ```go
 ids, err := c.Scan("fleet").Do(ctx)

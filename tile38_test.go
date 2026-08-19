@@ -1695,3 +1695,242 @@ func TestSetPointZ(t *testing.T) {
 		t.Errorf("pipelined command = %q, want %q", cmd, want)
 	}
 }
+
+// serveScript answers each command with the next reply in turn, over one pooled
+// connection, and records every command it was sent. A command past the end of
+// the script gets the last reply, so a test asserting that paging stopped can
+// check the recorded count rather than hanging.
+func serveScript(t *testing.T, replies ...string) (addr string, sent func() [][]string) {
+	t.Helper()
+	var mu sync.Mutex
+	var got [][]string
+	addr = fakeServer(t, func(r *bufio.Reader, w net.Conn) {
+		for i := 0; ; i++ {
+			v, err := resp.ReadReply(r)
+			if err != nil {
+				return // the client closed; not a failure
+			}
+			arr, ok := v.([]any)
+			if !ok {
+				t.Errorf("command is %T, want array", v)
+				return
+			}
+			cmd := make([]string, len(arr))
+			for j, a := range arr {
+				cmd[j], _ = a.(string)
+			}
+			mu.Lock()
+			got = append(got, cmd)
+			mu.Unlock()
+
+			reply := replies[len(replies)-1]
+			if i < len(replies) {
+				reply = replies[i]
+			}
+			if _, err := io.WriteString(w, reply); err != nil {
+				return
+			}
+		}
+	})
+	return addr, func() [][]string {
+		mu.Lock()
+		defer mu.Unlock()
+		out := make([][]string, len(got))
+		copy(out, got)
+		return out
+	}
+}
+
+// Iter follows the cursor itself, so the caller sees one flat run of items and
+// never a page boundary. Truncation is its loop condition, not an error.
+func TestIter(t *testing.T) {
+	// Two ids and a cursor of 2, then one id and a cursor of 0: the scan
+	// resumed and ran out.
+	page1 := wire("*2", ":2", "*2", "$2", "t1", "$2", "t2")
+	page2 := wire("*2", ":0", "*1", "$2", "t3")
+
+	t.Run("pages to completion", func(t *testing.T) {
+		addr, sent := serveScript(t, page1, page2)
+		c := New(addr)
+		defer c.Close()
+
+		var ids []string
+		for id, err := range c.Scan("fleet").Iter(t.Context()) {
+			if err != nil {
+				t.Fatalf("Iter yielded %v, want no error", err)
+			}
+			ids = append(ids, id)
+		}
+		if want := []string{"t1", "t2", "t3"}; !reflect.DeepEqual(ids, want) {
+			t.Errorf("ids = %q, want %q", ids, want)
+		}
+		want := [][]string{
+			{"SCAN", "fleet", "IDS"},
+			{"SCAN", "fleet", "CURSOR", "2", "IDS"},
+		}
+		if cmds := sent(); !reflect.DeepEqual(cmds, want) {
+			t.Errorf("commands = %q,\n            want %q", cmds, want)
+		}
+	})
+
+	// The element type rides on the builder, so a format switch changes what the
+	// range variable is without the caller naming it.
+	t.Run("yields the selected format's element", func(t *testing.T) {
+		objs := wire("*2", ":0", "*1", "*2", "$2", "t1", "$12", `{"type":"X"}`)
+		addr, _ := serveScript(t, objs)
+		c := New(addr)
+		defer c.Close()
+
+		var got []SearchObject
+		for obj, err := range c.Scan("fleet").Objects().Iter(t.Context()) {
+			if err != nil {
+				t.Fatal(err)
+			}
+			got = append(got, obj)
+		}
+		want := []SearchObject{{ID: "t1", GeoJSON: `{"type":"X"}`}}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("objects = %+v, want %+v", got, want)
+		}
+	})
+
+	// Breaking out stops asking for pages. Each page is an ordinary pooled round
+	// trip, so there is nothing to close — but there must also be no further
+	// command.
+	t.Run("an early break issues no further command", func(t *testing.T) {
+		addr, sent := serveScript(t, page1, page2)
+		c := New(addr)
+		defer c.Close()
+
+		for range c.Scan("fleet").Iter(t.Context()) {
+			break
+		}
+		if cmds := sent(); len(cmds) != 1 {
+			t.Errorf("sent %d commands, want 1: %q", len(cmds), cmds)
+		}
+	})
+
+	// Breaking makes yield return false, so searchIter returns and its deferred
+	// cursor restore runs. That only matters past the first page — the cursor is
+	// set between pages, so a break there is what would otherwise leave the
+	// abandoned scan's resume point on the builder.
+	t.Run("a break mid-scan restores the cursor", func(t *testing.T) {
+		addr, sent := serveScript(t, page1, page2)
+		c := New(addr)
+		defer c.Close()
+
+		cmd := c.Scan("fleet")
+		seen := 0
+		for range cmd.Iter(t.Context()) {
+			if seen++; seen == 3 { // page1 holds two ids, so this is on page2
+				break
+			}
+		}
+		if seen != 3 {
+			t.Fatalf("saw %d ids before breaking, want 3", seen)
+		}
+
+		if _, err := cmd.Do(t.Context()); err != nil && !errors.Is(err, ErrTruncated) {
+			t.Fatal(err)
+		}
+		want := []string{"SCAN", "fleet", "IDS"}
+		if cmds := sent(); !reflect.DeepEqual(cmds[len(cmds)-1], want) {
+			t.Errorf("command after break = %q, want %q", cmds[len(cmds)-1], want)
+		}
+	})
+
+	// An explicit Limit or Cursor is the caller's own bound — the same reason
+	// truncation stays silent there — so Iter yields that one page.
+	for name, tc := range map[string]struct {
+		build   func(*Client) *ScanCmd[string]
+		wantCmd []string
+	}{
+		"an explicit limit bounds the iteration": {
+			build:   func(c *Client) *ScanCmd[string] { return c.Scan("fleet").Limit(2) },
+			wantCmd: []string{"SCAN", "fleet", "LIMIT", "2", "IDS"},
+		},
+		"an explicit cursor bounds the iteration": {
+			build:   func(c *Client) *ScanCmd[string] { return c.Scan("fleet").Cursor(100) },
+			wantCmd: []string{"SCAN", "fleet", "CURSOR", "100", "IDS"},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			addr, sent := serveScript(t, page1, page2)
+			c := New(addr)
+			defer c.Close()
+
+			var ids []string
+			for id, err := range tc.build(c).Iter(t.Context()) {
+				if err != nil {
+					t.Fatalf("Iter yielded %v, want no error", err)
+				}
+				ids = append(ids, id)
+			}
+			if want := []string{"t1", "t2"}; !reflect.DeepEqual(ids, want) {
+				t.Errorf("ids = %q, want %q", ids, want)
+			}
+			if cmds := sent(); !reflect.DeepEqual(cmds, [][]string{tc.wantCmd}) {
+				t.Errorf("commands = %q, want %q", cmds, [][]string{tc.wantCmd})
+			}
+		})
+	}
+
+	// Iter drives the cursor on the shared searchState, so it has to put it back
+	// afterwards: a second range over the same builder must start over rather
+	// than resume where the first one stopped.
+	t.Run("a second iteration starts over", func(t *testing.T) {
+		addr, sent := serveScript(t, page1, page2, page1, page2)
+		c := New(addr)
+		defer c.Close()
+
+		cmd := c.Scan("fleet")
+		for range 2 {
+			for _, err := range cmd.Iter(t.Context()) {
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		first := []string{"SCAN", "fleet", "IDS"}
+		resumed := []string{"SCAN", "fleet", "CURSOR", "2", "IDS"}
+		want := [][]string{first, resumed, first, resumed}
+		if cmds := sent(); !reflect.DeepEqual(cmds, want) {
+			t.Errorf("commands = %q,\n            want %q", cmds, want)
+		}
+	})
+
+	// A real error ends the range, rather than being swallowed the way
+	// truncation is.
+	t.Run("an error ends the iteration", func(t *testing.T) {
+		addr, sent := serveScript(t, page1, wire("-ERR key not found"))
+		c := New(addr)
+		defer c.Close()
+
+		var ids []string
+		var gotErr error
+		for id, err := range c.Scan("fleet").Iter(t.Context()) {
+			if err != nil {
+				gotErr = err
+				break
+			}
+			ids = append(ids, id)
+		}
+		if gotErr == nil {
+			t.Fatal("Iter yielded no error, want one")
+		}
+		var serverErr ServerError
+		if !errors.As(gotErr, &serverErr) {
+			t.Errorf("error = %v, want a ServerError", gotErr)
+		}
+		if errors.Is(gotErr, ErrTruncated) {
+			t.Error("Iter reported ErrTruncated, which is its loop condition")
+		}
+		// The first page's items still reached the caller.
+		if want := []string{"t1", "t2"}; !reflect.DeepEqual(ids, want) {
+			t.Errorf("ids = %q, want %q", ids, want)
+		}
+		if cmds := sent(); len(cmds) != 2 {
+			t.Errorf("sent %d commands, want 2: %q", len(cmds), cmds)
+		}
+	})
+}

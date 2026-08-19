@@ -154,24 +154,37 @@ if errors.Is(err, ErrTruncated) {
 }
 ```
 
-The results returned alongside the error are valid, just incomplete. Either page
-through the rest, or set an explicit `Limit` to say the cap is intended — an
-explicit `Limit` or `Cursor` silences the error, since then the bound is yours.
+The results returned alongside the error are valid, just incomplete.
+
+To take everything, range `Iter` instead of calling `Do`. It follows the cursor
+itself, yields one result at a time so you never see a page boundary, and never
+reports `ErrTruncated` — paging is what it does instead of complaining:
 
 ```go
-cmd := c.Scan("fleet")
-for {
-    ids, err := cmd.Do(ctx)
-    if err != nil && !errors.Is(err, tile38.ErrTruncated) {
+for id, err := range c.Scan("fleet").Iter(ctx) {
+    if err != nil {
         return err
     }
-    use(ids)
-    if !errors.Is(err, tile38.ErrTruncated) {
-        break
-    }
-    cmd = c.Scan("fleet").Cursor(cmd.NextCursor())
+    use(id)
 }
 ```
+
+`Iter` is on every search verb and follows the output format, so the range
+variable is whatever that format yields — a `SearchObject` here:
+
+```go
+for obj, err := range c.Nearby("fleet").Point(33.5, -112.2).Radius(5000).Objects().Iter(ctx) {
+    …
+}
+```
+
+Breaking out of the range just stops asking for pages; each one is an ordinary
+pooled round trip, so nothing is left open.
+
+Otherwise, set an explicit `Limit` to say the cap is intended — an explicit
+`Limit` or `Cursor` silences the error, since then the bound is yours, and it
+bounds `Iter` the same way: one page, not the whole collection. `Cursor` and
+`NextCursor` are still there for driving the paging by hand.
 
 ## Live geofences
 

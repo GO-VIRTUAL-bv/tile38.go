@@ -129,6 +129,24 @@ They were defined types while they carried `decodeReply`; with the decoder on
 the format they no longer need methods, and aliasing keeps the public names
 while letting `Do` return `[]E`.
 
+**`Iter` pages; `Do` does not.** `Do` is one round trip, one page, and
+`ErrTruncated` when the server capped it — that error is load-bearing, and
+nothing about it changed. `Iter(ctx) iter.Seq2[E, error]` follows the cursor
+instead, yielding one item at a time so the caller never sees a page boundary,
+and never reports `ErrTruncated` because truncation is its loop condition.
+
+`searchIter` drives `opts.cursor` on the shared `searchState` and reads
+`cursorOut` between pages, restoring the caller's own cursor when the range ends
+— otherwise a second `Iter` on one builder would resume mid-scan instead of
+starting over. An explicit `Limit` or `Cursor` bounds it to a single page, the
+same reasoning that keeps `truncation` silent there. `TestIter` pins all of it,
+including that an early `break` issues no further command.
+
+Putting `error` in the range signature rather than offering `iter.Seq[E]` plus a
+trailing `Err()` is deliberate: the second form reads better but lets a caller
+forget the check, and the whole truncation design exists to stop errors going
+unnoticed.
+
 **`Count` and `Fence` are terminals, not formats.** `Count(ctx) (int, error)`
 replies with a bare integer: no element type for a builder to carry, no cursor
 to record, and no truncation to report, because the server exempts COUNT from

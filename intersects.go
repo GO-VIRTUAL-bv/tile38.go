@@ -6,6 +6,7 @@ package tile38
 
 import (
 	"context"
+	"iter"
 )
 
 // IntersectsCmd builds a Tile38 INTERSECTS query.
@@ -227,6 +228,24 @@ func (cmd *IntersectsCmd[E]) A5Cells(level int) *IntersectsCmd[A5Result] {
 // to IDS. It reports ErrTruncated when Tile38 capped an unbounded search.
 func (cmd *IntersectsCmd[E]) Do(ctx context.Context) ([]E, error) {
 	return searchDo(ctx, cmd.searchState, cmd.out)
+}
+
+// Iter pages the search to completion, yielding one result at a time in whichever
+// output format was selected. It never reports ErrTruncated: following the
+// cursor is what it does instead.
+//
+//	for obj, err := range cmd.Objects().Iter(ctx) {
+//		if err != nil {
+//			return err
+//		}
+//		use(obj)
+//	}
+//
+// An explicit Limit or Cursor is the caller's own bound, so Iter yields that one
+// page rather than paging past it. Breaking out of the range just stops asking
+// for pages; nothing is left open.
+func (cmd *IntersectsCmd[E]) Iter(ctx context.Context) iter.Seq2[E, error] {
+	return searchIter(ctx, cmd.searchState, cmd.out)
 }
 
 // Count runs the COUNT form: INTERSECTS collection [opts] COUNT <area>.
