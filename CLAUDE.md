@@ -93,17 +93,59 @@ shape is new.
 
 **Search builders are generic over their result type.** `NearbyCmd[T]`,
 `WithinCmd[T]`, `IntersectsCmd[T]`, `ScanCmd[T]` and `SearchCmd[T]` all hold a
-shared `*searchState` plus a `searchOutput[T]`, and one `Do(ctx) ([]T, error)`
-serves every output format. An output-format method — `Points`, `Objects`,
-`Rects`, `Hashes`, `A5Cells`, `PointsWithDistance`, `Strings`, `IDs` — returns
-the *same builder at a different `T`*; a fresh command is `[string]` and emits
-`IDS`.
+shared `*searchState` plus a non-generic `format` (tokens + keyword), and one
+`Do(ctx) (T, error)` serves every output format. An output-format method —
+`Points`, `Objects`, `Rects`, `Hashes`, `A5Cells`, `PointsWithDistance`,
+`Strings`, `IDs` — returns the *same builder at a different `T`*; a fresh
+command is `[IDs]`.
 
-The reason for the shape: a type parameter carries no behaviour at run time, so
-`searchOutput[T]` pairs the format's tokens with the parse func that decodes
-them. Without that pairing `Do` could not know how to decode `T`, and the
-alternative is one terminal per format per builder — 35 today, and 62 once
-paging is added.
+**Each result type decodes its own reply.** The result types are **named
+slices** — `IDs`, `Points`, `Objects`, `Rects`, `Hashes`, `A5Cells`, `Strings`,
+`PointsWithDistance` in `types.go` — each with a `decodeReply` method in
+`parse.go`. The method lives on the slice rather than the element because
+`string` cannot have methods, so an element-level design would force `[]ID` on
+callers.
+
+`searchDo` finds that method by asserting the unexported `results[T]`:
+
+```go
+type results[T any] interface {
+	decodeReply(prefix string, reply any) (T, uint64, error)
+}
+
+switch decoder := any(zero).(type) {
+case results[T]:
+	…
+case int: // COUNT — see below
+	…
+default: // T cannot decode a reply
+}
+```
+
+**`Count` is an output format, not a terminal, and `int` is its result type.**
+`int` cannot carry a method, so it gets its own arm rather than implementing
+`results`. That arm neither records a cursor nor calls `truncation`: COUNT
+replies with a bare integer and the server exempts it from the hundred-result
+cap, so there is nothing to resume from and nothing to report. Moving COUNT
+into the `results` arm would reintroduce exactly the bug `parseCount` refuses —
+reading the cursor as a count.
+
+`Fence` stays a terminal: it returns a `*Stream`, not a value.
+
+Both the interface and the method are unexported, so the set is closed to this
+package — a caller cannot add a result type, and could not request one anyway
+since the format tokens come from the builders.
+
+The builders stay `[T any]` rather than `[T results[T]]`. Constraining them
+would catch a nonsense `T` at compile time, but it puts a self-referential
+constraint in every exported signature and in godoc. The trade is deliberate:
+the fallback arm reports an error before spending a round trip, and
+`TestSearchDoRejectsNonResultType` pins it. A bad `T` is unreachable through
+the public API regardless — only `Client` builds a builder, and only the format
+switches re-type one.
+
+Without any of this, the alternative is one terminal per format per builder —
+35 today, and 62 once paging is added.
 
 Methods cannot have type parameters in Go (`method must have no type
 parameters`; golang/go#49085 is open and unaccepted), which is why the parameter
@@ -117,8 +159,8 @@ typed handles on one chain cannot mutate each other. `TestFormatSwitch` pins
 that, along with the default output, order-independence across the switch, and
 last-switch-wins.
 
-`Count` and `Fence` stay ordinary terminals: `COUNT` replies with a bare integer
-and no cursor, and `Fence` returns a `*Stream`. Neither fits `([]T, error)`.
+`Fence` stays an ordinary terminal: it returns a `*Stream` rather than a value,
+so it has no place in the `Do` path.
 
 **Methods are named after Tile38 keywords**, in Go casing — `Point` not `At`,
 `EX` not `TTL`, `FSet`/`FGet` not `FSET`/`FGET`. Someone reading a chain should

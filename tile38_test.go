@@ -129,7 +129,7 @@ func TestNearbyPoints(t *testing.T) {
 	if cmd := <-got; !reflect.DeepEqual(cmd, want) {
 		t.Errorf("command = %q, want %q", cmd, want)
 	}
-	wantRes := []NearbyResult{{ID: "truck1", Lat: 33.5, Lon: -115.5}}
+	wantRes := Points{{ID: "truck1", Lat: 33.5, Lon: -115.5}}
 	if !reflect.DeepEqual(res, wantRes) {
 		t.Errorf("result = %+v, want %+v", res, wantRes)
 	}
@@ -173,17 +173,17 @@ func TestChainOrderIsIrrelevant(t *testing.T) {
 	// options in the order given, then LIMIT, then the format, then the geometry.
 	want := []string{"NEARBY", "fleet", "WHERE", "speed > 5", "LIMIT", "10", "POINTS", "POINT", "33.5", "-115.5", "5000"}
 
-	orders := map[string]func(*Client) *NearbyCmd[string]{
-		"options first": func(c *Client) *NearbyCmd[string] {
+	orders := map[string]func(*Client) *NearbyCmd[IDs]{
+		"options first": func(c *Client) *NearbyCmd[IDs] {
 			return c.Nearby("fleet").Limit(10).Where("speed > 5").Point(33.5, -115.5).Radius(5000)
 		},
-		"options last": func(c *Client) *NearbyCmd[string] {
+		"options last": func(c *Client) *NearbyCmd[IDs] {
 			return c.Nearby("fleet").Point(33.5, -115.5).Radius(5000).Limit(10).Where("speed > 5")
 		},
-		"interleaved": func(c *Client) *NearbyCmd[string] {
+		"interleaved": func(c *Client) *NearbyCmd[IDs] {
 			return c.Nearby("fleet").Point(33.5, -115.5).Limit(10).Radius(5000).Where("speed > 5")
 		},
-		"radius before at": func(c *Client) *NearbyCmd[string] {
+		"radius before at": func(c *Client) *NearbyCmd[IDs] {
 			return c.Nearby("fleet").Radius(5000).Limit(10).Point(33.5, -115.5).Where("speed > 5")
 		},
 	}
@@ -267,6 +267,39 @@ func TestFormatSwitch(t *testing.T) {
 		}
 	})
 
+	// COUNT is an output format like the others now, so it has to assemble in
+	// the same place regardless of chain order — and its reply is a bare
+	// integer, which is why it decodes through its own arm of searchDo.
+	t.Run("count is an output format", func(t *testing.T) {
+		want := []string{"WITHIN", "fleet", "LIMIT", "10", "COUNT", "BOUNDS", "-90", "-180", "90", "180"}
+		for name, build := range map[string]func(*Client) *WithinCmd[int]{
+			"limit first": func(c *Client) *WithinCmd[int] {
+				return c.Within("fleet").Limit(10).Bounds(GlobalBounds()).Count()
+			},
+			"count first": func(c *Client) *WithinCmd[int] {
+				return c.Within("fleet").Count().Limit(10).Bounds(GlobalBounds())
+			},
+		} {
+			t.Run(name, func(t *testing.T) {
+				got := make(chan []string, 1)
+				addr := fakeServer(t, func(r *bufio.Reader, w net.Conn) {
+					got <- readCommand(t, r)
+					_, _ = io.WriteString(w, ":7\r\n")
+				})
+				c := New(addr)
+				defer c.Close()
+
+				n, err := build(c).Do(t.Context())
+				if err != nil || n != 7 {
+					t.Fatalf("Do() = %d, %v; want 7, nil", n, err)
+				}
+				if cmd := <-got; !reflect.DeepEqual(cmd, want) {
+					t.Errorf("command = %q,\n           want %q", cmd, want)
+				}
+			})
+		}
+	})
+
 	// A switch clones the chain. Sharing it by pointer would let two typed
 	// handles on one command mutate each other, which is a bug the older
 	// terminals could not have, because a format was never a value you held.
@@ -283,6 +316,30 @@ func TestFormatSwitch(t *testing.T) {
 			t.Errorf("command = %q,\n           want %q", got, want)
 		}
 	})
+}
+
+// T is unconstrained, so a builder typed at something that cannot decode a
+// reply is expressible. It has no route through the public API — only the
+// format switches produce a typed builder — but the fallback must report
+// rather than panic, and must not spend a round trip finding out.
+func TestSearchDoRejectsNonResultType(t *testing.T) {
+	addr := fakeServer(t, func(r *bufio.Reader, w net.Conn) {
+		t.Error("no command should reach the server")
+	})
+	c := New(addr)
+	defer c.Close()
+
+	cmd := &NearbyCmd[float64]{
+		searchState: &searchState{c: c, verb: "NEARBY", args: []any{"NEARBY", "fleet"}},
+		out:         formatIDs,
+	}
+	got, err := cmd.Do(t.Context())
+	if err == nil {
+		t.Fatalf("Do() = %v, want an error", got)
+	}
+	if want := "float64 is not a search result type"; !strings.Contains(err.Error(), want) {
+		t.Errorf("error = %q, want it to contain %q", err, want)
+	}
 }
 
 // Tile38 rejects a repeated LIMIT/DETECT/COMMANDS, so calling those twice must
@@ -383,7 +440,7 @@ func TestDetectIgnoredWithoutFence(t *testing.T) {
 	defer c.Close()
 
 	if _, err := c.Within("fleet").Detect(Enter).Commands(CommandSet).
-		Bounds(GlobalBounds()).Count(t.Context()); err != nil {
+		Bounds(GlobalBounds()).Count().Do(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -591,32 +648,32 @@ func TestSearchTruncation(t *testing.T) {
 
 	tests := map[string]struct {
 		reply      string
-		build      func(*Client) *ScanCmd[string]
+		build      func(*Client) *ScanCmd[IDs]
 		wantErr    bool
 		wantCursor uint64
 		wantCmd    []string
 	}{
 		"non-zero cursor without a limit reports truncation": {
 			reply:      truncated,
-			build:      func(c *Client) *ScanCmd[string] { return c.Scan("fleet") },
+			build:      func(c *Client) *ScanCmd[IDs] { return c.Scan("fleet") },
 			wantErr:    true,
 			wantCursor: 2,
 			wantCmd:    []string{"SCAN", "fleet", "IDS"},
 		},
 		"zero cursor is a complete result": {
 			reply:   complete,
-			build:   func(c *Client) *ScanCmd[string] { return c.Scan("fleet") },
+			build:   func(c *Client) *ScanCmd[IDs] { return c.Scan("fleet") },
 			wantCmd: []string{"SCAN", "fleet", "IDS"},
 		},
 		"an explicit limit means the cap was asked for": {
 			reply:      truncated,
-			build:      func(c *Client) *ScanCmd[string] { return c.Scan("fleet").Limit(2) },
+			build:      func(c *Client) *ScanCmd[IDs] { return c.Scan("fleet").Limit(2) },
 			wantCursor: 2,
 			wantCmd:    []string{"SCAN", "fleet", "LIMIT", "2", "IDS"},
 		},
 		"paging with a cursor is deliberate": {
 			reply:      truncated,
-			build:      func(c *Client) *ScanCmd[string] { return c.Scan("fleet").Cursor(100) },
+			build:      func(c *Client) *ScanCmd[IDs] { return c.Scan("fleet").Cursor(100) },
 			wantCursor: 2,
 			wantCmd:    []string{"SCAN", "fleet", "CURSOR", "100", "IDS"},
 		},
@@ -638,7 +695,7 @@ func TestSearchTruncation(t *testing.T) {
 				t.Errorf("err = %v, want ErrTruncated: %v", err, tc.wantErr)
 			}
 			// The partial results are valid and must come back either way.
-			if want := []string{"t1", "t2"}; !reflect.DeepEqual(ids, want) {
+			if want := (IDs{"t1", "t2"}); !reflect.DeepEqual(ids, want) {
 				t.Errorf("ids = %q, want %q", ids, want)
 			}
 			if cmd.NextCursor() != tc.wantCursor {
@@ -690,7 +747,7 @@ func TestCountRejectsArrayReply(t *testing.T) {
 			c := New(addr)
 			defer c.Close()
 
-			n, err := c.Within("fleet").Bounds(GlobalBounds()).Count(t.Context())
+			n, err := c.Within("fleet").Bounds(GlobalBounds()).Count().Do(t.Context())
 			if name == "bare integer" {
 				if err != nil || n != 7 {
 					t.Errorf("Count = %d, %v; want 7, nil", n, err)
@@ -972,7 +1029,7 @@ func TestPointsDecodeFields(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		want := []NearbyResult{{ID: "a", Lat: 51.2, Lon: 4.4, Fields: Fields{"speed": "12.5", "driver": "bob"}}}
+		want := Points{{ID: "a", Lat: 51.2, Lon: 4.4, Fields: Fields{"speed": "12.5", "driver": "bob"}}}
 		if !reflect.DeepEqual(res, want) {
 			t.Errorf("points = %+v, want %+v", res, want)
 		}
@@ -990,7 +1047,7 @@ func TestPointsDecodeFields(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		want := []NearbyResultWithDistance{{
+		want := PointsWithDistance{{
 			NearbyResult: NearbyResult{ID: "a", Lat: 51.2, Lon: 4.4, Fields: Fields{"speed": "12.5", "driver": "bob"}},
 			Distance:     120,
 		}}
@@ -1061,7 +1118,7 @@ func TestPointsDecodeZ(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		want := []NearbyResult{
+		want := Points{
 			{ID: "a", Lat: 51.2, Lon: 4.4, Z: 100.5},
 			{ID: "b", Lat: 51.2, Lon: 4.4},
 		}
@@ -1085,7 +1142,7 @@ func TestPointsDecodeZ(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		want := []NearbyResultWithDistance{{
+		want := PointsWithDistance{{
 			NearbyResult: NearbyResult{ID: "a", Lat: 51.2, Lon: 4.4, Z: 100.5, Fields: Fields{"speed": "42"}},
 			Distance:     120,
 		}}
@@ -1272,7 +1329,7 @@ func TestOutputFormatDecoding(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		want := []RectResult{{
+		want := Rects{{
 			ID:     "a",
 			Bounds: BoundsResult{SW: [2]float64{51.1, 4.1}, NE: [2]float64{51.3, 4.3}},
 			Fields: Fields{"speed": "42"},
@@ -1295,7 +1352,7 @@ func TestOutputFormatDecoding(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		want := []HashResult{{ID: "a", Hash: "9mvyed", Fields: Fields{"speed": "42"}}}
+		want := Hashes{{ID: "a", Hash: "9mvyed", Fields: Fields{"speed": "42"}}}
 		if !reflect.DeepEqual(res, want) {
 			t.Errorf("hashes = %+v, want %+v", res, want)
 		}
@@ -1314,7 +1371,7 @@ func TestOutputFormatDecoding(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		want := []A5Result{{ID: "a", Cell: "1970980000000000"}}
+		want := A5Cells{{ID: "a", Cell: "1970980000000000"}}
 		if !reflect.DeepEqual(res, want) {
 			t.Errorf("a5 cells = %+v, want %+v", res, want)
 		}
@@ -1370,14 +1427,14 @@ func TestOptionAndAreaTokens(t *testing.T) {
 		},
 		"hash area": {
 			run: func(c *Client) error {
-				_, err := c.Intersects("fleet").Hash("9mv").Count(t.Context())
+				_, err := c.Intersects("fleet").Hash("9mv").Count().Do(t.Context())
 				return err
 			},
 			want: []string{"INTERSECTS", "fleet", "COUNT", "HASH", "9mv"},
 		},
 		"quadkey area": {
 			run: func(c *Client) error {
-				_, err := c.Within("fleet").QuadKey("0231").Count(t.Context())
+				_, err := c.Within("fleet").QuadKey("0231").Count().Do(t.Context())
 				return err
 			},
 			want: []string{"WITHIN", "fleet", "COUNT", "QUADKEY", "0231"},
@@ -1385,7 +1442,7 @@ func TestOptionAndAreaTokens(t *testing.T) {
 		// An area replaces whatever came before it rather than appending.
 		"last area wins": {
 			run: func(c *Client) error {
-				_, err := c.Within("fleet").Hash("9mv").QuadKey("0231").Count(t.Context())
+				_, err := c.Within("fleet").Hash("9mv").QuadKey("0231").Count().Do(t.Context())
 				return err
 			},
 			want: []string{"WITHIN", "fleet", "COUNT", "QUADKEY", "0231"},
@@ -1541,7 +1598,7 @@ func TestSearchStrings(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []StringObject{{ID: "note1", Value: "hello world", Fields: Fields{"prio": "3"}}}
+	want := Strings{{ID: "note1", Value: "hello world", Fields: Fields{"prio": "3"}}}
 	if !reflect.DeepEqual(res, want) {
 		t.Errorf("strings = %+v, want %+v", res, want)
 	}

@@ -39,27 +39,27 @@ func (c *Client) Get(collection, id string) *GetCmd {
 }
 
 // Nearby starts building a Tile38 NEARBY query for the given collection.
-func (c *Client) Nearby(collection string) *NearbyCmd[string] {
-	return &NearbyCmd[string]{
+func (c *Client) Nearby(collection string) *NearbyCmd[IDs] {
+	return &NearbyCmd[IDs]{
 		searchState: &searchState{c: c, verb: "NEARBY", args: []any{"NEARBY", collection}},
-		out:         outIDs(),
+		out:         formatIDs,
 	}
 }
 
 // Scan starts building a Tile38 SCAN query for the given collection.
-func (c *Client) Scan(collection string) *ScanCmd[string] {
-	return &ScanCmd[string]{
+func (c *Client) Scan(collection string) *ScanCmd[IDs] {
+	return &ScanCmd[IDs]{
 		searchState: &searchState{c: c, verb: "SCAN", args: []any{"SCAN", collection}},
-		out:         outIDs(),
+		out:         formatIDs,
 	}
 }
 
 // Search starts building a Tile38 SEARCH query, which matches on the string
 // values "SET … STRING" stores rather than on geometry.
-func (c *Client) Search(collection string) *SearchCmd[string] {
-	return &SearchCmd[string]{
+func (c *Client) Search(collection string) *SearchCmd[IDs] {
+	return &SearchCmd[IDs]{
 		searchState: &searchState{c: c, verb: "SEARCH", args: []any{"SEARCH", collection}},
-		out:         outIDs(),
+		out:         formatIDs,
 	}
 }
 
@@ -70,18 +70,18 @@ func (c *Client) Test(area Area) *TestCmd {
 }
 
 // Within starts building a Tile38 WITHIN query for the given collection.
-func (c *Client) Within(collection string) *WithinCmd[string] {
-	return &WithinCmd[string]{
+func (c *Client) Within(collection string) *WithinCmd[IDs] {
+	return &WithinCmd[IDs]{
 		searchState: &searchState{c: c, verb: "WITHIN", args: []any{"WITHIN", collection}},
-		out:         outIDs(),
+		out:         formatIDs,
 	}
 }
 
 // Intersects starts building a Tile38 INTERSECTS query for the given collection.
-func (c *Client) Intersects(collection string) *IntersectsCmd[string] {
-	return &IntersectsCmd[string]{
+func (c *Client) Intersects(collection string) *IntersectsCmd[IDs] {
+	return &IntersectsCmd[IDs]{
 		searchState: &searchState{c: c, verb: "INTERSECTS", args: []any{"INTERSECTS", collection}},
-		out:         outIDs(),
+		out:         formatIDs,
 	}
 }
 

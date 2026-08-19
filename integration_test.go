@@ -281,7 +281,7 @@ func TestSearchOutputFormats(t *testing.T) {
 	}
 
 	// COUNT replies with a bare integer, not a [count, …] array.
-	n, err := c.Nearby(key).Point(33.5, -115.5).Radius(5000).Count(ctx)
+	n, err := c.Nearby(key).Point(33.5, -115.5).Radius(5000).Count().Do(ctx)
 	if err != nil {
 		t.Fatalf("nearby count: %v", err)
 	}
@@ -334,7 +334,7 @@ func TestSearchOutputFormats(t *testing.T) {
 		t.Errorf("scan a5 cells = %+v", cells)
 	}
 
-	if n, err = c.Nearby(key).Limit(1).Point(33.5, -115.5).Radius(5000).Count(ctx); err != nil || n != 1 {
+	if n, err = c.Nearby(key).Limit(1).Point(33.5, -115.5).Radius(5000).Count().Do(ctx); err != nil || n != 1 {
 		t.Errorf("nearby limit 1 count = %d, %v; want 1, nil", n, err)
 	}
 	if ids, err = c.Nearby(key).Where("speed > 5").Point(33.5, -115.5).Radius(5000).Do(ctx); err != nil || len(ids) != 2 {
@@ -354,10 +354,10 @@ func TestWithinAndIntersects(t *testing.T) {
 	}
 
 	for name, got := range map[string]func() (int, error){
-		"within bounds":     func() (int, error) { return c.Within(key).Bounds(33, -116, 34, -115).Count(ctx) },
-		"within circle":     func() (int, error) { return c.Within(key).Circle(33.5, -115.5, 5000).Count(ctx) },
-		"intersects bounds": func() (int, error) { return c.Intersects(key).Bounds(33, -116, 34, -115).Count(ctx) },
-		"intersects circle": func() (int, error) { return c.Intersects(key).Circle(33.5, -115.5, 5000).Count(ctx) },
+		"within bounds":     func() (int, error) { return c.Within(key).Bounds(33, -116, 34, -115).Count().Do(ctx) },
+		"within circle":     func() (int, error) { return c.Within(key).Circle(33.5, -115.5, 5000).Count().Do(ctx) },
+		"intersects bounds": func() (int, error) { return c.Intersects(key).Bounds(33, -116, 34, -115).Count().Do(ctx) },
+		"intersects circle": func() (int, error) { return c.Intersects(key).Circle(33.5, -115.5, 5000).Count().Do(ctx) },
 	} {
 		n, err := got()
 		if err != nil {
@@ -411,7 +411,7 @@ func TestScan(t *testing.T) {
 		t.Errorf("scan match = %v, %v; want 2 results", ids, err)
 	}
 
-	n, err := c.Scan(key).Count(ctx)
+	n, err := c.Scan(key).Count().Do(ctx)
 	if err != nil || n != 3 {
 		t.Errorf("scan count = %d, %v; want 3, nil", n, err)
 	}
@@ -526,23 +526,23 @@ func TestOptionsAndAreas(t *testing.T) {
 
 	// BUFFER grows the area; Tile38 only buffers point-like areas, so this uses a
 	// circle rather than a bounding box.
-	near, err := c.Intersects(key).Buffer(50000).Circle(33.5, -115.5, 10).Count(ctx)
+	near, err := c.Intersects(key).Buffer(50000).Circle(33.5, -115.5, 10).Count().Do(ctx)
 	if err != nil {
 		t.Fatalf("buffer: %v", err)
 	}
-	if bare, err := c.Intersects(key).Circle(33.5, -115.5, 10).Count(ctx); err != nil || near <= bare {
+	if bare, err := c.Intersects(key).Circle(33.5, -115.5, 10).Count().Do(ctx); err != nil || near <= bare {
 		t.Errorf("buffered count = %d, unbuffered = %d, err %v; want buffered to match more", near, bare, err)
 	}
 
 	// SECTOR, HASH and QUADKEY are areas WITHIN and INTERSECTS take and NEARBY
 	// rejects outright.
-	if n, err := c.Within(key).Sector(33.5, -115.5, 100000, 270, 360).Count(ctx); err != nil || n == 0 {
+	if n, err := c.Within(key).Sector(33.5, -115.5, 100000, 270, 360).Count().Do(ctx); err != nil || n == 0 {
 		t.Errorf("sector count = %d, %v; want > 0", n, err)
 	}
-	if n, err := c.Within(key).Hash("9mv").Count(ctx); err != nil || n == 0 {
+	if n, err := c.Within(key).Hash("9mv").Count().Do(ctx); err != nil || n == 0 {
 		t.Errorf("hash count = %d, %v; want > 0", n, err)
 	}
-	if _, err := c.Intersects(key).QuadKey("023").Count(ctx); err != nil {
+	if _, err := c.Intersects(key).QuadKey("023").Count().Do(ctx); err != nil {
 		t.Errorf("quadkey: %v", err)
 	}
 }
@@ -633,7 +633,7 @@ func TestSearchStringsAndFExists(t *testing.T) {
 	if res[0].Fields["prio"] != "3" {
 		t.Errorf("search fields = %v, want prio=3", res[0].Fields)
 	}
-	if n, err := c.Search(key).Count(ctx); err != nil || n != 2 {
+	if n, err := c.Search(key).Count().Do(ctx); err != nil || n != 2 {
 		t.Errorf("search count = %d, %v; want 2", n, err)
 	}
 	// SEARCH is the other verb that takes an order.
@@ -788,7 +788,7 @@ func TestPipeline(t *testing.T) {
 		t.Errorf("Len after flush = %d, want 0", p.Len())
 	}
 
-	count, err := c.Scan(key).Count(ctx)
+	count, err := c.Scan(key).Count().Do(ctx)
 	if err != nil {
 		t.Fatalf("count: %v", err)
 	}
@@ -1300,7 +1300,7 @@ func TestConcurrentCommands(t *testing.T) {
 		}
 	}
 
-	n, err := c.Scan(key).Count(ctx)
+	n, err := c.Scan(key).Count().Do(ctx)
 	if err != nil {
 		t.Fatalf("count: %v", err)
 	}

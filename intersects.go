@@ -6,7 +6,6 @@ package tile38
 
 import (
 	"context"
-	"fmt"
 )
 
 // IntersectsCmd builds a Tile38 INTERSECTS query.
@@ -16,13 +15,7 @@ import (
 // order when the command runs.
 type IntersectsCmd[T any] struct {
 	*searchState
-	out searchOutput[T]
-}
-
-// intersectsAt re-wraps the chain at a new output type. The state is cloned so
-// the handle before the switch and the one after it cannot mutate each other.
-func intersectsAt[T, U any](cmd *IntersectsCmd[T], out searchOutput[U]) *IntersectsCmd[U] {
-	return &IntersectsCmd[U]{cmd.clone(), out}
+	out format
 }
 
 // Limit caps the number of results. Zero means no limit.
@@ -196,51 +189,52 @@ func (cmd *IntersectsCmd[T]) Tile(x, y, z int) *IntersectsCmd[T] {
 
 // IDs selects the IDS output format: INTERSECTS collection [opts] IDS <area>.
 // It is what a fresh command already emits, and is here to switch back.
-func (cmd *IntersectsCmd[T]) IDs() *IntersectsCmd[string] { return intersectsAt(cmd, outIDs()) }
+func (cmd *IntersectsCmd[T]) IDs() *IntersectsCmd[IDs] {
+	return &IntersectsCmd[IDs]{cmd.clone(), formatIDs}
+}
 
 // Points selects the POINTS output format: INTERSECTS collection [opts] POINTS <area>.
-func (cmd *IntersectsCmd[T]) Points() *IntersectsCmd[NearbyResult] {
-	return intersectsAt(cmd, outPoints("INTERSECTS"))
+func (cmd *IntersectsCmd[T]) Points() *IntersectsCmd[Points] {
+	return &IntersectsCmd[Points]{cmd.clone(), formatPoints}
 }
 
 // Objects selects the OBJECTS output format: INTERSECTS collection [opts] OBJECTS <area>.
-func (cmd *IntersectsCmd[T]) Objects() *IntersectsCmd[SearchObject] {
-	return intersectsAt(cmd, outObjects("INTERSECTS"))
+func (cmd *IntersectsCmd[T]) Objects() *IntersectsCmd[Objects] {
+	return &IntersectsCmd[Objects]{cmd.clone(), formatObjects}
 }
 
 // Rects selects the BOUNDS output format: INTERSECTS collection [opts] BOUNDS <area>.
 // Each result is the bounding box of a matching object, lat first.
-func (cmd *IntersectsCmd[T]) Rects() *IntersectsCmd[RectResult] {
-	return intersectsAt(cmd, outRects("INTERSECTS"))
+func (cmd *IntersectsCmd[T]) Rects() *IntersectsCmd[Rects] {
+	return &IntersectsCmd[Rects]{cmd.clone(), formatRects}
 }
 
 // Hashes selects the HASHES output format: INTERSECTS collection [opts] HASHES precision <area>.
 // Each result is the geohash of a matching object's centre.
-func (cmd *IntersectsCmd[T]) Hashes(precision int) *IntersectsCmd[HashResult] {
-	return intersectsAt(cmd, outHashes("INTERSECTS", precision))
+func (cmd *IntersectsCmd[T]) Hashes(precision int) *IntersectsCmd[Hashes] {
+	return &IntersectsCmd[Hashes]{cmd.clone(), formatHashes(precision)}
 }
 
 // A5Cells selects the A5 output format: INTERSECTS collection [opts] A5 level <area>.
 // Requires a server built from upstream master.
-func (cmd *IntersectsCmd[T]) A5Cells(level int) *IntersectsCmd[A5Result] {
-	return intersectsAt(cmd, outA5Cells("INTERSECTS", level))
+func (cmd *IntersectsCmd[T]) A5Cells(level int) *IntersectsCmd[A5Cells] {
+	return &IntersectsCmd[A5Cells]{cmd.clone(), formatA5Cells(level)}
 }
 
 // Do executes the command in whichever output format was selected, defaulting
 // to IDS. It reports ErrTruncated when Tile38 capped an unbounded search.
-func (cmd *IntersectsCmd[T]) Do(ctx context.Context) ([]T, error) {
-	return searchDo(ctx, cmd.searchState, cmd.out)
+func (cmd *IntersectsCmd[T]) Do(ctx context.Context) (T, error) {
+	return searchDo[T](ctx, cmd.searchState, cmd.out)
 }
 
-// Count executes: INTERSECTS collection [opts] COUNT <area>.
-// It is not part of the Do path: COUNT is exempt from Tile38's result cap and
-// replies with a bare integer rather than a cursor and a list.
-func (cmd *IntersectsCmd[T]) Count(ctx context.Context) (int, error) {
-	val, err := cmd.c.do(ctx, cmd.execArgs([]string{"COUNT"})...)
-	if err != nil {
-		return 0, fmt.Errorf("tile38: INTERSECTS COUNT: %w", err)
-	}
-	return parseCount("INTERSECTS", val)
+// Count selects the COUNT output format: INTERSECTS collection [opts] COUNT <area>.
+// Do then returns the number of matching objects.
+//
+// COUNT is the one format whose reply is a bare integer rather than a cursor
+// and a list, so it reports no truncation: the server exempts it from the
+// hundred-result cap that ErrTruncated exists to surface.
+func (cmd *IntersectsCmd[T]) Count() *IntersectsCmd[int] {
+	return &IntersectsCmd[int]{cmd.clone(), formatCount}
 }
 
 // Fence opens a live geofence: INTERSECTS collection [opts] FENCE [DETECT …] <area>.
