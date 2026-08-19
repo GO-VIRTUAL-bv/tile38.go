@@ -52,11 +52,11 @@ it is chained, not a terminal, and may be called either side of the options:
 | `Hashes(precision)` | `Hashes` | `[]HashResult` |
 | `A5Cells(level)` | `A5Cells` | `[]A5Result` |
 | `Strings()` | `Strings` | `[]StringObject` (Search only) |
-| `Count()` | `int` | bare integer; exempt from the 100 cap, never `ErrTruncated` |
+| `Count(ctx)` | `int` | terminal, not a format: bare integer, exempt from the 100 cap, never `ErrTruncated` |
 
-Each result type is a named slice, so it behaves as its underlying slice —
-range, index, `len`. Note `reflect.DeepEqual` compares types, so a test wanting
-`Points{…}` will not match `[]NearbyResult{…}`.
+Each result type is an alias for its slice, so it behaves as that slice —
+range, index, `len` — and is the *same* type: `Points` and `[]NearbyResult` are
+interchangeable, including under `reflect.DeepEqual`.
 
 One terminal sits outside that path, because it returns no value at all:
 
@@ -87,7 +87,7 @@ One terminal sits outside that path, because it returns no value at all:
 ```go
 pts, err  := c.Nearby("fleet").Limit(10).Point(33.5, -115.5).Radius(5000).Points().Do(ctx)
 ids, err  := c.Nearby("fleet").Where("speed > 40").Point(33.5, -115.5).Radius(5000).Do(ctx)
-n, err    := c.Within("fleet").Bounds(33, -116, 34, -115).Count().Do(ctx)
+n, err    := c.Within("fleet").Bounds(33, -116, 34, -115).Count(ctx)
 objs, err := c.Intersects("fleet").Circle(33.5, -115.5, 5000).Objects().Do(ctx)
 near, err := c.Nearby("fleet").Point(33.5, -115.5).Radius(5000).PointsWithDistance().Do(ctx)
 trucks, err := c.Scan("fleet").Match("truck:*").Do(ctx)

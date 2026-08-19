@@ -71,13 +71,14 @@ best — they are assembled into protocol order when the command runs.
 A search ends in `Do`, and an output-format method decides what `Do` gives back:
 `Points()` makes it a `Points` (`[]NearbyResult`), `Objects()` an `Objects`
 (`[]SearchObject`), and so on. Leave the format out and you get `IDs`
-(`[]string`). Each is an ordinary slice — range it, index it, pass it where its
-element type is wanted:
+(`[]string`). Those names are aliases for the slices themselves, so a result is
+an ordinary slice — range it, index it, pass it where its element type is
+wanted:
 
 ```go
 pts, err := c.Nearby("fleet").Limit(10).Point(33.5, -115.5).Radius(5000).Points().Do(ctx)
 ids, err := c.Nearby("fleet").Where("speed > 40").Point(33.5, -115.5).Radius(5000).Do(ctx)
-n, err := c.Within("fleet").Bounds(33, -116, 34, -115).Count().Do(ctx)
+n, err := c.Within("fleet").Bounds(33, -116, 34, -115).Count(ctx)
 objs, err := c.Intersects("fleet").Circle(33.5, -115.5, 5000).Objects().Do(ctx)
 near, err := c.Nearby("fleet").Point(33.5, -115.5).Radius(5000).PointsWithDistance().Do(ctx)
 trucks, err := c.Scan("fleet").Match("truck:*").Do(ctx)
@@ -95,12 +96,10 @@ accumulate; `Limit`, `Cursor`, `Sparse`, `NoFields`, `Clip`, and `Asc`/`Desc`
 are single-use and overwrite. They chain either side of the output format:
 `.Limit(10).Points()` and `.Points().Limit(10)` emit the same bytes.
 
-`Count()` is an output format like the others, with `int` as its result type:
-`c.Within("fleet").Bounds(…).Count().Do(ctx)`. It never reports `ErrTruncated`,
-because Tile38 exempts `COUNT` from the result cap.
-
-`Fence` is the one terminal that is not an output format — it returns a live
-`*Stream` instead of a value.
+`Count` and `Fence` are terminals rather than output formats, so they end a
+chain in place of `Do`: `c.Within("fleet").Bounds(…).Count(ctx)` returns an
+`int`, and `Fence(ctx)` returns a live `*Stream`. `Count` never reports
+`ErrTruncated`, because Tile38 exempts `COUNT` from the result cap.
 
 `Points` and `Objects` results carry the object's `Fields` beside its geometry,
 so reading a collection's state is one round trip rather than an `FGet` per

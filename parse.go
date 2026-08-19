@@ -267,61 +267,13 @@ func parseRects(prefix string, val any) ([]RectResult, uint64, error) {
 
 // ── Results decoding ──────────────────────────────────────────────────────────
 //
-// Each output format decodes its own reply, which is what lets one Do serve all
-// of them. The reply reaching decodeReply has already been decoded from RESP by
-// internal/resp, so it arrives as a string, int64, []any or nil rather than as
-// wire bytes; prefix is the search verb, for error text.
-
-// results is implemented by every output format below. It is unexported, and so
-// is decodeReply, so the set is closed to this package — a caller cannot add a
-// result type, and the format tokens come from the builders anyway.
+// Each parse function above is a format's decoder: format[E] holds one directly,
+// which is what lets the builders be parameterised by the element type. Nothing
+// has to hang a method off E, so IDS decodes to a plain string.
 //
-// searchDo reaches it through a type assertion rather than a constraint on the
-// builders, which keeps NearbyCmd[T any] readable in godoc at the cost of
-// moving a nonsense T from a compile error to a run-time one.
-type results[T any] interface {
-	decodeReply(prefix string, reply any) (T, uint64, error)
-}
-
-func (IDs) decodeReply(prefix string, reply any) (IDs, uint64, error) {
-	res, cursor, err := parseScanIDs(prefix, reply)
-	return res, cursor, err
-}
-
-func (Points) decodeReply(prefix string, reply any) (Points, uint64, error) {
-	res, cursor, err := parsePoints(prefix+" Points", reply)
-	return Points(res), cursor, err
-}
-
-func (PointsWithDistance) decodeReply(prefix string, reply any) (PointsWithDistance, uint64, error) {
-	res, cursor, err := parsePointsWithDistance(prefix, reply)
-	return PointsWithDistance(res), cursor, err
-}
-
-func (Objects) decodeReply(prefix string, reply any) (Objects, uint64, error) {
-	res, cursor, err := parseObjects(prefix, reply)
-	return Objects(res), cursor, err
-}
-
-func (Rects) decodeReply(prefix string, reply any) (Rects, uint64, error) {
-	res, cursor, err := parseRects(prefix, reply)
-	return Rects(res), cursor, err
-}
-
-func (Hashes) decodeReply(prefix string, reply any) (Hashes, uint64, error) {
-	res, cursor, err := parseHashes(prefix, reply)
-	return Hashes(res), cursor, err
-}
-
-func (A5Cells) decodeReply(prefix string, reply any) (A5Cells, uint64, error) {
-	res, cursor, err := parseA5Cells(prefix, reply)
-	return A5Cells(res), cursor, err
-}
-
-func (Strings) decodeReply(prefix string, reply any) (Strings, uint64, error) {
-	res, cursor, err := parseStrings(prefix, reply)
-	return Strings(res), cursor, err
-}
+// The reply reaching a decoder has already been decoded from RESP by
+// internal/resp, so it arrives as a string, int64, []any or nil rather than as
+// wire bytes; prefix is the search verb and format keyword, for error text.
 
 // parseFields decodes the optional FIELDS element of a search result item, which
 // Tile38 emits as a flat [name, value, name, value, …] array and omits entirely
