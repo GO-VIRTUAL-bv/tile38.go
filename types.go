@@ -4,7 +4,11 @@
 
 package tile38
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"fmt"
+	"strconv"
+)
 
 // Result types returned by the command builders. Coordinates are always
 // {lat, lon}, matching the order Tile38 takes them in, with the optional third
@@ -38,6 +42,70 @@ func (f *Fields) UnmarshalJSON(data []byte) error {
 	}
 	*f = out
 	return nil
+}
+
+// FieldOf decodes the named field into T, which is what a caller wants from
+// Fields most of the time: the map holds Tile38's text encoding, so reading a
+// number off a result otherwise means a strconv call at every call site.
+//
+// ok is false when the field is absent *or* does not decode as a T. Those are
+// different bugs and this deliberately collapses them — when the difference
+// matters, index Fields directly and convert.
+//
+// A nil Fields is an ordinary miss, which is what an object with no non-zero
+// fields and a NoFields query both give back.
+//
+// Named FieldOf rather than Field because Field already builds a key/value pair
+// for the write builders.
+//
+// The constraint has no ~ terms on purpose. Under ~float64 a named type would
+// compile and then fall through the switch, because any(&value) is *knots
+// rather than *float64, and the caller would get a zero it never decoded.
+// Without the tilde that is a compile error instead.
+func FieldOf[T float64 | int64 | bool | string](f Fields, name string) (value T, ok bool) {
+	raw, present := f[name]
+	if !present {
+		return value, false
+	}
+	switch p := any(&value).(type) {
+	case *string:
+		*p = raw
+	case *float64:
+		v, err := strconv.ParseFloat(raw, 64)
+		if err != nil {
+			return value, false
+		}
+		*p = v
+	case *int64:
+		// ParseInt, so "42.5" is a miss rather than a silent truncation to 42.
+		v, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil {
+			return value, false
+		}
+		*p = v
+	case *bool:
+		v, err := strconv.ParseBool(raw)
+		if err != nil {
+			return value, false
+		}
+		*p = v
+	default:
+		// Unreachable while the constraint has no ~ terms. Kept so that widening
+		// it later degrades to a miss rather than to a silent zero.
+		return value, false
+	}
+	return value, true
+}
+
+// MustFieldOf is FieldOf for a field the caller knows is set. It panics when
+// FieldOf would report false, naming both possibilities because it cannot tell
+// them apart.
+func MustFieldOf[T float64 | int64 | bool | string](f Fields, name string) T {
+	value, ok := FieldOf[T](f, name)
+	if !ok {
+		panic(fmt.Sprintf("tile38: field %q is missing or not a %T", name, value))
+	}
+	return value
 }
 
 // NearbyResult holds a single result from a Nearby or Scan query.

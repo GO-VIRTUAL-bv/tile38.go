@@ -117,7 +117,20 @@ when it is zero, so a zero `Z` and a two-dimensional point are the same thing.
 
 Values are Tile38's own text encoding — the decimal form of a number, the
 verbatim JSON text of a JSON field — and are absent for an object whose fields
-are all zero or when the query used `NoFields`. One object's fields come back
+are all zero or when the query used `NoFields`. `FieldOf` decodes one without a
+`strconv` call at every call site, and `MustFieldOf` panics instead of reporting
+a miss, for a field you control and know is set:
+
+```go
+speed, ok := tile38.FieldOf[float64](p.Fields, "speed")   // float64, int64, bool, string
+if !ok {
+    continue // absent, or not a float64 — FieldOf does not distinguish
+}
+id := tile38.MustFieldOf[int64](p.Fields, "vehicle_id")
+```
+
+It is `FieldOf` rather than `Field` because `Field` already builds a key/value
+pair for writes. One object's fields come back
 with its geometry through `Get(...).WithFields()`:
 
 ```go

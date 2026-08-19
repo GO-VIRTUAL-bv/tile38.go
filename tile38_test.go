@@ -1934,3 +1934,108 @@ func TestIter(t *testing.T) {
 		}
 	})
 }
+
+// Fields holds Tile38's text encoding, so FieldOf is the hot path for reading a
+// number off a search result. ok collapses "absent" and "undecodable" — both are
+// a miss, and the zero value comes back either way.
+func TestFieldOf(t *testing.T) {
+	f := Fields{
+		"speed":   "42.5",
+		"count":   "7",
+		"active":  "true",
+		"driver":  "bob",
+		"blank":   "",
+		"geojson": `{"type":"Point"}`,
+	}
+
+	t.Run("decodes each supported type", func(t *testing.T) {
+		if v, ok := FieldOf[float64](f, "speed"); !ok || v != 42.5 {
+			t.Errorf("float64 = %v, %v; want 42.5, true", v, ok)
+		}
+		if v, ok := FieldOf[int64](f, "count"); !ok || v != 7 {
+			t.Errorf("int64 = %v, %v; want 7, true", v, ok)
+		}
+		if v, ok := FieldOf[bool](f, "active"); !ok || !v {
+			t.Errorf("bool = %v, %v; want true, true", v, ok)
+		}
+		if v, ok := FieldOf[string](f, "driver"); !ok || v != "bob" {
+			t.Errorf("string = %q, %v; want \"bob\", true", v, ok)
+		}
+		// A JSON field stays raw text: normalising it further is the caller's
+		// business, and Fields.UnmarshalJSON has already made the two arrival
+		// paths agree.
+		if v, ok := FieldOf[string](f, "geojson"); !ok || v != `{"type":"Point"}` {
+			t.Errorf("json = %q, %v; want the raw text, true", v, ok)
+		}
+	})
+
+	// int64 goes through ParseInt, so a fractional value is a miss rather than a
+	// silent truncation to 42. Nobody should "fix" this into ParseFloat + cast.
+	t.Run("int64 rejects a fractional value", func(t *testing.T) {
+		if v, ok := FieldOf[int64](f, "speed"); ok || v != 0 {
+			t.Errorf("int64 of %q = %v, %v; want 0, false", f["speed"], v, ok)
+		}
+	})
+
+	t.Run("a miss yields the zero value", func(t *testing.T) {
+		for name, tc := range map[string]func() (any, bool){
+			"absent":              func() (any, bool) { v, ok := FieldOf[float64](f, "nope"); return v, ok },
+			"undecodable":         func() (any, bool) { v, ok := FieldOf[float64](f, "driver"); return v, ok },
+			"empty string as num": func() (any, bool) { v, ok := FieldOf[float64](f, "blank"); return v, ok },
+			// Nil is what an object with no non-zero fields, or a NoFields
+			// query, hands back — an ordinary lookup miss, not a panic.
+			"nil Fields": func() (any, bool) { v, ok := FieldOf[int64](nil, "speed"); return v, ok },
+		} {
+			t.Run(name, func(t *testing.T) {
+				v, ok := tc()
+				if ok {
+					t.Errorf("ok = true, want false")
+				}
+				if v != reflect.Zero(reflect.TypeOf(v)).Interface() {
+					t.Errorf("value = %v, want the zero value", v)
+				}
+			})
+		}
+		// An empty string is a legitimate string, unlike a number.
+		if v, ok := FieldOf[string](f, "blank"); !ok || v != "" {
+			t.Errorf("string of an empty field = %q, %v; want \"\", true", v, ok)
+		}
+	})
+
+	t.Run("MustFieldOf returns the value when it decodes", func(t *testing.T) {
+		if v := MustFieldOf[float64](f, "speed"); v != 42.5 {
+			t.Errorf("MustFieldOf = %v, want 42.5", v)
+		}
+	})
+
+	// The panic names both possibilities, because MustFieldOf cannot tell an
+	// absent field from an undecodable one.
+	t.Run("MustFieldOf panics on a miss", func(t *testing.T) {
+		for name, tc := range map[string]struct {
+			call func()
+			want string
+		}{
+			"absent": {
+				call: func() { MustFieldOf[float64](f, "missing") },
+				want: `tile38: field "missing" is missing or not a float64`,
+			},
+			"undecodable": {
+				call: func() { MustFieldOf[int64](f, "driver") },
+				want: `tile38: field "driver" is missing or not a int64`,
+			},
+		} {
+			t.Run(name, func(t *testing.T) {
+				defer func() {
+					r := recover()
+					if r == nil {
+						t.Fatal("no panic, want one")
+					}
+					if got, ok := r.(string); !ok || got != tc.want {
+						t.Errorf("panic = %v, want %q", r, tc.want)
+					}
+				}()
+				tc.call()
+			})
+		}
+	})
+}

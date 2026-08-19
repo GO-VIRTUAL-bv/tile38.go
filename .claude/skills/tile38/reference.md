@@ -201,7 +201,10 @@ err := p.Flush(ctx)
   from SERVER — Tile38 has no DBSIZE command).
 - JSON fields: `JSet(coll, id, path, value)`, `JGet(coll, id, path)`,
   `JDel(coll, id, path)`.
-- Fields: `FSet(coll, id).Field(k, v)`.
+- Fields: `FSet(coll, id).Field(k, v)` to write; `tile38.FieldOf[T](f, name)`
+  (`float64`/`int64`/`bool`/`string`, comma-ok) or `MustFieldOf[T]` to read one
+  off a result. `ok == false` means absent *or* undecodable; a nil `Fields` is a
+  miss. Named `FieldOf` because `Field` already builds a write pair.
 
 ## Escape hatch
 
