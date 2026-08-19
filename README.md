@@ -280,6 +280,27 @@ that shape, or to register several endpoints on one hook, use `EndpointURL`:
 c.SetHook("alerts").EndpointURL("kafka://k:9092/events", "http://x/y?token=1")
 ```
 
+Tile38 parses thirteen endpoint schemes, each with its own path shape and query
+parameters, and reports a mistake only as an `invalid argument` at `SETHOOK`
+time. The `endpoint` package builds those URLs instead — required parts are
+positional, options are named after the parameter they set, and values are
+escaped:
+
+```go
+import "github.com/GO-VIRTUAL-bv/tile38.go/endpoint"
+
+c.SetHook("alerts").
+    EndpointURL(
+        endpoint.NATS("10.0.0.1:4222", "fleet.events", endpoint.NATSJetstream()),
+        endpoint.Kafka([]string{"k1:9092", "k2:9092"}, "fleet-events", endpoint.KafkaSSL()),
+    ).
+    Within("fleet").Circle(51.05, 3.72, 500).Do(ctx)
+```
+
+Each constructor returns a plain `string`, so it nests straight into
+`EndpointURL`. `http://` and `https://` need no helper — Tile38 takes those
+verbatim.
+
 Hooks and channels trigger on `Nearby`, `Within`, or `Intersects`, take the same
 fence areas as a search — `Bounds`, `Circle`, `Object`, `Get`, `A5` — plus
 `Roam`, and accept `Meta` and `EX`. `GlobalBounds()` returns the whole-world box

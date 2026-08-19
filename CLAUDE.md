@@ -51,10 +51,11 @@ fixing a finding over widening those.
 
 ## Layout
 
-A Go package is a directory, so the whole public API is `package tile38` in the
+A Go package is a directory, so the client API is all `package tile38` in the
 repo root — it cannot be split across folders without changing the import path.
-The root therefore holds **only public API**, and the wire plumbing lives under
-`internal/`:
+The root therefore holds **only public API**, the wire plumbing lives under
+`internal/`, and the one thing deliberately given its own import path is
+`endpoint/`:
 
 ```
 tile38.go        Client, New + Option funcs, Close/Ping/Do — transport façade
@@ -70,6 +71,7 @@ management.go    DROP, RENAME, TTL, KEYS, BOUNDS, … builders
 stream.go        Stream (live fences and subscriptions)
 fence_event.go   FenceEvent
 parse.go         reply → result-type decoding
+endpoint/        SETHOOK endpoint URL builders (public, imported by callers)
 internal/resp/   RESP codec: AppendCommand, ReadReply, Error
 internal/conn/   Conn and Pool — dialling, pooling, deadlines, pipelining
 ```
@@ -78,6 +80,10 @@ internal/conn/   Conn and Pool — dialling, pooling, deadlines, pipelining
 depends on both. Keep it that way — `parse.go` stays in the root precisely
 because it decodes into public result types, and moving it down would create an
 import cycle.
+
+`endpoint` is the one other public package. It depends on nothing, not even the
+root: its constructors return plain strings, which is what lets them nest inside
+`EndpointURL` — see **Endpoint URLs** below.
 
 `ServerError` is a type alias for `resp.Error` so the internal codec can return
 it while callers still `errors.As` against the public name.
@@ -257,6 +263,52 @@ connection from `Pool.Dial`, which never returns to the pool, and carry no read
 deadline — a quiet fence sends nothing for hours. Both live fences (bulk string
 of JSON) and pub/sub pushes (`[message, channel, payload]` arrays) decode to
 `*FenceEvent`, so `Stream.Next` handles both shapes and skips subscribe acks.
+
+**Endpoint URLs** (`endpoint/`). Tile38 parses thirteen endpoint schemes in
+`internal/endpoint/endpoint.go`, each with its own path shape and its own query
+parameter set, and `Manager.Validate` is parse-only — so a wrong URL surfaces as
+`invalid argument` at `SETHOOK` time, or as a hook that registers and never
+delivers.
+
+The package is a sibling rather than part of the root because it is ~50 names,
+and every constructor returns a plain `string` so it nests inside
+`EndpointURL(urls ...string)` with no change to `HookCmd`. Nothing returns
+`(string, error)`: that signature cannot nest, and the server's parser is the
+only authority worth asking anyway. What the constructors do instead is make the
+documented failures unreachable — required parts are positional parameters,
+optional ones are option funcs (`func(url.Values)`, one type per scheme so a
+Kafka option cannot reach a NATS URL), and every path segment and option value
+goes through `url.QueryEscape`, which is exactly what Tile38 reverses.
+
+Three rules are workarounds for the server rather than escaping, and
+`TestEndpointQuirksStillHold` pins that each is still needed:
+
+- **NATS demands an explicit port.** Its host switch accepts only `len(hp) == 2`,
+  so `nats://host/subject` is rejected — with the message `invalid SQS url`, an
+  upstream copy/paste. `NATS` appends `:4222` rather than pass that on.
+- **`retained` is parsed as an integer, alone among the flags.** MQTT rejects
+  `retained=true` with `invalid MQTT retained value`, so `MQTTRetained` sends
+  `1`. Every other flag in every other scheme reads `true` fine — Kafka through
+  `strconv.ParseBool`, NATS and AMQP through `queryBool`.
+- **Only the first path segment is read** (`sp := strings.Split(sqp[0], "/")`,
+  then only `sp[1]`), so an unescaped `fleet/eu/events` silently becomes
+  `fleet`. MQTT is the exception and joins `sp[1:]`, but escaping the topic whole
+  round-trips either way, so there is one rule.
+
+Other shapes worth knowing: `sqs://<region>:<queueID>/<name>` and
+`pubsub://<project>:<topic>` put a colon-joined *pair* in the host position, not
+a host:port; `cf-queue` requires its `token` parameter, so it is positional;
+EventHub is not a URL at all but four ordered semicolon parts behind an
+`Endpoint=` prefix. `AMQPDurable` takes a bool because it is the one flag Tile38
+defaults to true. `http`/`https` get no constructor — Tile38 takes them verbatim
+— except that any `https://sqs.*.amazonaws.com` URL is read as SQS instead.
+
+A comma-joined Kafka broker list survives `SETHOOK`'s own endpoint separator:
+`splitEndpointURLs` splits on commas but rejoins any part carrying no scheme.
+
+`TestEndpointURLs` runs every constructor through a real `SETHOOK` and reads it
+back with `HOOKS`, so upstream's parser is the acceptance test; `endpoint_test.go`
+covers the byte-level escaping decisions without Docker.
 
 **Protocol tokens are named types.** `DetectState` and `Command` are `~string`
 types with exported constants, so a typo is a compile error rather than a server
