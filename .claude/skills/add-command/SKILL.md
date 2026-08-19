@@ -139,7 +139,7 @@ Extend the invariant tests that already exist rather than writing parallel ones:
 | `TestRepeatedOptions` | single-use vs accumulating options |
 | `TestDetectIgnoredWithoutFence` | fence-only token rendering |
 
-Add an `integration_test.go` case (build tag `integration`) when the command's
+Add a `tile38_integration_test.go` case (build tag `integration`) when the command's
 behaviour depends on real server state. Each test takes its collection key from
 `t.Name()` and drops it on cleanup.
 
@@ -147,7 +147,7 @@ behaviour depends on real server state. Each test takes its collection key from
 
 ```bash
 make fmt
-make vet     # both tag sets — a plain `go vet ./...` never compiles integration_test.go
+make vet     # both tag sets — a plain `go vet ./...` never compiles tile38_integration_test.go
 make lint
 make test
 ```

@@ -365,6 +365,6 @@ covers the transport against a local listener: pool defaults, the AUTH
 handshake, which errors return a connection to the pool, `MaxIdle` eviction,
 pipelining, and cancellation. `tile38_test.go` drives a scripted `net.Listener`
 that returns hand-written RESP bytes, covering the commands the builders emit
-and the stream lifecycle, without Docker. `integration_test.go` (build tag
+and the stream lifecycle, without Docker. `tile38_integration_test.go` (build tag
 `integration`) shares one container across the package via `TestMain`; each
 test takes its own collection key from `t.Name()` and drops it on cleanup.
