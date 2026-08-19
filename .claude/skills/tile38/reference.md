@@ -202,9 +202,11 @@ err := p.Flush(ctx)
 - JSON fields: `JSet(coll, id, path, value)`, `JGet(coll, id, path)`,
   `JDel(coll, id, path)`.
 - Fields: `FSet(coll, id).Field(k, v)` to write; `tile38.FieldOf[T](f, name)`
-  (`float64`/`int64`/`bool`/`string`, comma-ok) or `MustFieldOf[T]` to read one
-  off a result. `ok == false` means absent *or* undecodable; a nil `Fields` is a
-  miss. Named `FieldOf` because `Field` already builds a write pair.
+  (comma-ok) or `MustFieldOf[T]` to read one off a result. `T` is any basic
+  numeric type plus `bool`/`string` (`FieldValue`). `ok == false` means absent
+  *or* undecodable; a nil `Fields` is a miss; decoding is exact, so `int8` of
+  `"300"` and `uint` of `"-1"` are misses. Named `FieldOf` because `Field`
+  already builds a write pair.
 
 ## Escape hatch
 

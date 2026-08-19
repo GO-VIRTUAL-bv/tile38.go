@@ -2002,6 +2002,76 @@ func TestFieldOf(t *testing.T) {
 		}
 	})
 
+	// Every type in FieldValue decodes, and byte/rune come along as aliases of
+	// uint8/int32.
+	t.Run("decodes every width", func(t *testing.T) {
+		w := Fields{"n": "42", "neg": "-42", "f": "1.5"}
+		if v, ok := FieldOf[float32](w, "f"); !ok || v != 1.5 {
+			t.Errorf("float32 = %v, %v; want 1.5, true", v, ok)
+		}
+		if v, ok := FieldOf[int](w, "neg"); !ok || v != -42 {
+			t.Errorf("int = %v, %v; want -42, true", v, ok)
+		}
+		if v, ok := FieldOf[int8](w, "neg"); !ok || v != -42 {
+			t.Errorf("int8 = %v, %v; want -42, true", v, ok)
+		}
+		if v, ok := FieldOf[int16](w, "n"); !ok || v != 42 {
+			t.Errorf("int16 = %v, %v; want 42, true", v, ok)
+		}
+		if v, ok := FieldOf[int32](w, "n"); !ok || v != 42 {
+			t.Errorf("int32 = %v, %v; want 42, true", v, ok)
+		}
+		if v, ok := FieldOf[uint](w, "n"); !ok || v != 42 {
+			t.Errorf("uint = %v, %v; want 42, true", v, ok)
+		}
+		if v, ok := FieldOf[uint8](w, "n"); !ok || v != 42 {
+			t.Errorf("uint8 = %v, %v; want 42, true", v, ok)
+		}
+		if v, ok := FieldOf[uint16](w, "n"); !ok || v != 42 {
+			t.Errorf("uint16 = %v, %v; want 42, true", v, ok)
+		}
+		if v, ok := FieldOf[uint32](w, "n"); !ok || v != 42 {
+			t.Errorf("uint32 = %v, %v; want 42, true", v, ok)
+		}
+		if v, ok := FieldOf[uint64](w, "n"); !ok || v != 42 {
+			t.Errorf("uint64 = %v, %v; want 42, true", v, ok)
+		}
+		if v, ok := FieldOf[byte](w, "n"); !ok || v != 42 { // byte is uint8
+			t.Errorf("byte = %v, %v; want 42, true", v, ok)
+		}
+		if v, ok := FieldOf[rune](w, "n"); !ok || v != 42 { // rune is int32
+			t.Errorf("rune = %v, %v; want 42, true", v, ok)
+		}
+	})
+
+	// The bit size passed to strconv is what makes a decode exact. A value the
+	// target cannot hold is a miss, never a wrapped or truncated number.
+	t.Run("a value the type cannot hold is a miss", func(t *testing.T) {
+		w := Fields{"big": "300", "neg": "-1", "huge": "99999999999999999999", "big32": "1e39"}
+		for name, tc := range map[string]func() (any, bool){
+			"int8 overflow":    func() (any, bool) { v, ok := FieldOf[int8](w, "big"); return v, ok },
+			"uint8 overflow":   func() (any, bool) { v, ok := FieldOf[uint8](w, "big"); return v, ok },
+			"uint negative":    func() (any, bool) { v, ok := FieldOf[uint](w, "neg"); return v, ok },
+			"uint64 negative":  func() (any, bool) { v, ok := FieldOf[uint64](w, "neg"); return v, ok },
+			"int64 overflow":   func() (any, bool) { v, ok := FieldOf[int64](w, "huge"); return v, ok },
+			"float32 overflow": func() (any, bool) { v, ok := FieldOf[float32](w, "big32"); return v, ok },
+		} {
+			t.Run(name, func(t *testing.T) {
+				v, ok := tc()
+				if ok {
+					t.Errorf("ok = true, want false (got %v)", v)
+				}
+				if v != reflect.Zero(reflect.TypeOf(v)).Interface() {
+					t.Errorf("value = %v, want the zero value", v)
+				}
+			})
+		}
+		// int16 holds 300 fine — the miss above is the width, not the value.
+		if v, ok := FieldOf[int16](w, "big"); !ok || v != 300 {
+			t.Errorf("int16 = %v, %v; want 300, true", v, ok)
+		}
+	})
+
 	t.Run("MustFieldOf returns the value when it decodes", func(t *testing.T) {
 		if v := MustFieldOf[float64](f, "speed"); v != 42.5 {
 			t.Errorf("MustFieldOf = %v, want 42.5", v)

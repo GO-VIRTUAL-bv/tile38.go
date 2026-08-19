@@ -122,12 +122,18 @@ are all zero or when the query used `NoFields`. `FieldOf` decodes one without a
 a miss, for a field you control and know is set:
 
 ```go
-speed, ok := tile38.FieldOf[float64](p.Fields, "speed")   // float64, int64, bool, string
+speed, ok := tile38.FieldOf[float64](p.Fields, "speed")
 if !ok {
     continue // absent, or not a float64 — FieldOf does not distinguish
 }
 id := tile38.MustFieldOf[int64](p.Fields, "vehicle_id")
 ```
+
+`T` is any basic numeric type, plus `bool` and `string` — every float, signed and
+unsigned integer width, with `byte` and `rune` along for free. Decoding is exact,
+so a value the type cannot hold is a miss rather than a truncation:
+`FieldOf[int64]` rejects `"42.5"`, `FieldOf[int8]` rejects `"300"`, and the
+unsigned types reject a negative.
 
 It is `FieldOf` rather than `Field` because `Field` already builds a key/value
 pair for writes. One object's fields come back
