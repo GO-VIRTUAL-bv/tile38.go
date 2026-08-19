@@ -1457,26 +1457,196 @@ func (cmd *HooksCmd) Do(ctx context.Context) ([]HookInfo, error) {
 	return parseHooks("HOOKS", val)
 }
 
+// ── Fences: SETHOOK and SETCHAN ───────────────────────────────────────────────
+
+// fenceState is everything SETHOOK and SETCHAN hold. The two commands take the
+// same trigger grammar after their name, so the parts — and the protocol order
+// they assemble in — are identical; only SETHOOK's positional endpoints differ.
+type fenceState struct {
+	c        *Client
+	name     string
+	meta     [][2]string
+	ex       *int
+	trigger  []any // NEARBY|WITHIN|INTERSECTS collection
+	args     []any // repeatable options that follow the trigger
+	detect   []DetectState
+	commands []Command
+	nodwell  bool
+	distance bool
+	geom     []any // fence area
+	radius   *int  // trailing metres of a POINT area
+}
+
+// fenceBase carries the chain methods HookCmd and SetChanCmd share. Self is the
+// concrete builder, so a chained method returns that rather than the base and
+// HookCmd.Endpoint stays reachable mid-chain.
+type fenceBase[Self any] struct {
+	fenceState
+	self Self
+}
+
+// Nearby selects the NEARBY spatial trigger. Use with Point and Radius, or with
+// Roam.
+func (cmd *fenceBase[Self]) Nearby(collection string) Self {
+	cmd.trigger = []any{"NEARBY", collection}
+	return cmd.self
+}
+
+// Within selects the WITHIN spatial trigger. Use with any fence area.
+func (cmd *fenceBase[Self]) Within(collection string) Self {
+	cmd.trigger = []any{"WITHIN", collection}
+	return cmd.self
+}
+
+// Intersects selects the INTERSECTS spatial trigger, which fires on any overlap
+// with the fence area rather than requiring full containment.
+func (cmd *fenceBase[Self]) Intersects(collection string) Self {
+	cmd.trigger = []any{"INTERSECTS", collection}
+	return cmd.self
+}
+
+// Meta attaches a key/value pair to the fence, echoed back on every event it
+// produces. It accumulates: each call adds another pair.
+func (cmd *fenceBase[Self]) Meta(key, value string) Self {
+	cmd.meta = append(cmd.meta, [2]string{key, value})
+	return cmd.self
+}
+
+// EX sets how long the fence lives before Tile38 removes it, in seconds.
+func (cmd *fenceBase[Self]) EX(secs int) Self {
+	cmd.ex = &secs
+	return cmd.self
+}
+
+// Where sets an optional Tile38 field expression filter.
+func (cmd *fenceBase[Self]) Where(expr string) Self {
+	cmd.args = append(cmd.args, "WHERE", expr)
+	return cmd.self
+}
+
+// Detect restricts the fence to the given transitions. When omitted, Tile38's
+// default detect set applies.
+func (cmd *fenceBase[Self]) Detect(states ...DetectState) Self {
+	cmd.detect = states
+	return cmd.self
+}
+
+// Commands restricts the fence to events caused by the given commands.
+func (cmd *fenceBase[Self]) Commands(commands ...Command) Self {
+	cmd.commands = commands
+	return cmd.self
+}
+
+// Roam fires when objects in the trigger collection come within radiusM metres
+// of an object in collection. Use with Nearby.
+//
+// Objects that stay in range keep reporting on each update; chain NoDwell to
+// suppress those.
+func (cmd *fenceBase[Self]) Roam(collection string, radiusM int) Self {
+	cmd.geom = []any{"ROAM", collection, "*", radiusM}
+	return cmd.self
+}
+
+// NoDwell stops a roaming fence from re-reporting objects that stay within range
+// between updates, matching Tile38's NODWELL keyword. It only affects Roam
+// fences, and it is opt-in: dwelling is Tile38's own default.
+func (cmd *fenceBase[Self]) NoDwell() Self {
+	cmd.nodwell = true
+	return cmd.self
+}
+
+// Distance adds each object's distance from the fence centre to every event the
+// fence produces, matching Tile38's DISTANCE keyword. It arrives on FenceEvent
+// as Distance, and applies to the live fence only — a plain query reads the same
+// value through PointsWithDistance.
+func (cmd *fenceBase[Self]) Distance() Self {
+	cmd.distance = true
+	return cmd.self
+}
+
+// Bounds sets the fence area to a lat/lon bounding box. Pass GlobalBounds() to
+// fence the whole world.
+func (cmd *fenceBase[Self]) Bounds(swLat, swLon, neLat, neLon float64) Self {
+	cmd.geom = []any{"BOUNDS", swLat, swLon, neLat, neLon}
+	return cmd.self
+}
+
+// Circle sets the fence area to a circle with centre + radius in metres.
+func (cmd *fenceBase[Self]) Circle(lat, lon float64, radius int) Self {
+	cmd.geom = []any{"CIRCLE", lat, lon, radius}
+	return cmd.self
+}
+
+// Point sets the fence area to a point, and is the area a Nearby trigger takes:
+// NEARBY reads "POINT lat lon meters" and rejects CIRCLE, so a hook or channel
+// fencing on NEARBY needs this rather than Circle. Pair it with Radius.
+func (cmd *fenceBase[Self]) Point(lat, lon float64) Self {
+	cmd.geom = []any{"POINT", lat, lon}
+	return cmd.self
+}
+
+// Radius sets the trailing metres of a Point area. Named for the value it
+// carries: Tile38 has no keyword for it, it is the last argument of
+// "POINT lat lon meters".
+func (cmd *fenceBase[Self]) Radius(metres int) Self {
+	cmd.radius = &metres
+	return cmd.self
+}
+
+// Object sets the fence area to an inline GeoJSON string.
+func (cmd *fenceBase[Self]) Object(geojson string) Self {
+	cmd.geom = []any{"OBJECT", geojson}
+	return cmd.self
+}
+
+// Sector sets the search area to a circular sector: a circle of radius metres
+// centred on lat/lon, clipped to the arc between two compass bearings in
+// degrees. Matches Tile38's SECTOR keyword, which NEARBY does not accept.
+func (cmd *fenceBase[Self]) Sector(lat, lon float64, metres int, bearing1, bearing2 float64) Self {
+	cmd.geom = []any{"SECTOR", lat, lon, metres, bearing1, bearing2}
+	return cmd.self
+}
+
+// Hash sets the search area to the box a geohash covers, matching Tile38's HASH
+// keyword. The shorter the hash, the larger the box.
+func (cmd *fenceBase[Self]) Hash(geohash string) Self {
+	cmd.geom = []any{"HASH", geohash}
+	return cmd.self
+}
+
+// QuadKey sets the search area to the tile a Bing Maps quadkey names, matching
+// Tile38's QUADKEY keyword. Tile is the same area expressed as x/y/z.
+func (cmd *fenceBase[Self]) QuadKey(quadkey string) Self {
+	cmd.geom = []any{"QUADKEY", quadkey}
+	return cmd.self
+}
+
+// Get sets the fence area to an object already stored in Tile38.
+func (cmd *fenceBase[Self]) Get(collection, id string) Self {
+	cmd.geom = []any{"GET", collection, id}
+	return cmd.self
+}
+
+// buildFence assembles the trigger, options, fence clause and area that follow a
+// SETHOOK or SETCHAN head, in the protocol order Tile38's parser requires.
+func (cmd *fenceBase[Self]) buildFence(head []any) []any {
+	head = append(head, cmd.trigger...)
+	return buildSearch(append(head, cmd.args...), searchOpts{},
+		fenceTokens(cmd.distance, cmd.detect, cmd.commands, cmd.nodwell), nil,
+		pointGeometry(cmd.geom, cmd.radius))
+}
+
 // HookCmd builds a Tile38 SETHOOK command: an endpoint, a spatial trigger
 // (Nearby/Within), optional Detect/Commands filters, and one fence area
-// (Bounds/Circle/Object/Get, or Roam).
+// (Bounds/Circle/Object/Get, or Roam). It shares its chain methods with
+// SetChanCmd through fenceBase, so every one of them returns *HookCmd however
+// godoc renders the promoted signature.
 //
 // Methods may be chained in any order; the parts are assembled into protocol
 // order when the command runs.
 type HookCmd struct {
-	c         *Client
-	name      string
+	fenceBase[*HookCmd]
 	endpoints []string
-	meta      [][2]string
-	ex        *int
-	trigger   []any // NEARBY|WITHIN|INTERSECTS collection
-	args      []any // repeatable options that follow the trigger
-	detect    []DetectState
-	commands  []Command
-	nodwell   bool
-	distance  bool
-	geom      []any // fence area
-	radius    *int  // trailing metres of a POINT area
 }
 
 // Endpoint adds a target endpoint built by joining a base URL and a subject or
@@ -1498,39 +1668,6 @@ func (cmd *HookCmd) EndpointURL(urls ...string) *HookCmd {
 	return cmd
 }
 
-// Nearby selects the NEARBY spatial trigger. Use with Point and Radius, or with
-// Roam.
-func (cmd *HookCmd) Nearby(collection string) *HookCmd {
-	cmd.trigger = []any{"NEARBY", collection}
-	return cmd
-}
-
-// Within selects the WITHIN spatial trigger. Use with any fence area.
-func (cmd *HookCmd) Within(collection string) *HookCmd {
-	cmd.trigger = []any{"WITHIN", collection}
-	return cmd
-}
-
-// Intersects selects the INTERSECTS spatial trigger, which fires on any overlap
-// with the fence area rather than requiring full containment.
-func (cmd *HookCmd) Intersects(collection string) *HookCmd {
-	cmd.trigger = []any{"INTERSECTS", collection}
-	return cmd
-}
-
-// Meta attaches a key/value pair to the hook, echoed back on every event it
-// produces. It accumulates: each call adds another pair.
-func (cmd *HookCmd) Meta(key, value string) *HookCmd {
-	cmd.meta = append(cmd.meta, [2]string{key, value})
-	return cmd
-}
-
-// EX sets how long the hook lives before Tile38 removes it, in seconds.
-func (cmd *HookCmd) EX(secs int) *HookCmd {
-	cmd.ex = &secs
-	return cmd
-}
-
 // Match filters the trigger collection by object ID pattern (glob-style, e.g.
 // "org:*"), matching Tile38's MATCH keyword. It accumulates: each call adds
 // another pattern.
@@ -1539,123 +1676,10 @@ func (cmd *HookCmd) Match(pattern string) *HookCmd {
 	return cmd
 }
 
-// Where sets an optional Tile38 field expression filter.
-func (cmd *HookCmd) Where(expr string) *HookCmd {
-	cmd.args = append(cmd.args, "WHERE", expr)
-	return cmd
-}
-
-// Detect restricts the hook to the given transitions. When omitted, Tile38's
-// default detect set applies.
-func (cmd *HookCmd) Detect(states ...DetectState) *HookCmd {
-	cmd.detect = states
-	return cmd
-}
-
-// Commands restricts the hook to events caused by the given commands.
-func (cmd *HookCmd) Commands(commands ...Command) *HookCmd {
-	cmd.commands = commands
-	return cmd
-}
-
-// Roam fires when objects in the trigger collection come within radiusM metres
-// of an object in collection. Use with Nearby.
-//
-// Objects that stay in range keep reporting on each update; chain NoDwell to
-// suppress those.
-func (cmd *HookCmd) Roam(collection string, radiusM int) *HookCmd {
-	cmd.geom = []any{"ROAM", collection, "*", radiusM}
-	return cmd
-}
-
-// NoDwell stops a roaming fence from re-reporting objects that stay within range
-// between updates, matching Tile38's NODWELL keyword. It only affects Roam
-// fences, and it is opt-in: dwelling is Tile38's own default.
-func (cmd *HookCmd) NoDwell() *HookCmd {
-	cmd.nodwell = true
-	return cmd
-}
-
-// Distance adds each object's distance from the fence centre to every event the
-// fence produces, matching Tile38's DISTANCE keyword. It arrives on FenceEvent
-// as Distance, and applies to the live fence only — a plain query reads the same
-// value through PointsWithDistance.
-func (cmd *HookCmd) Distance() *HookCmd {
-	cmd.distance = true
-	return cmd
-}
-
-// Bounds sets the fence area to a lat/lon bounding box. Pass GlobalBounds() to
-// fence the whole world.
-func (cmd *HookCmd) Bounds(swLat, swLon, neLat, neLon float64) *HookCmd {
-	cmd.geom = []any{"BOUNDS", swLat, swLon, neLat, neLon}
-	return cmd
-}
-
-// Circle sets the fence area to a circle with centre + radius in metres.
-func (cmd *HookCmd) Circle(lat, lon float64, radius int) *HookCmd {
-	cmd.geom = []any{"CIRCLE", lat, lon, radius}
-	return cmd
-}
-
-// Point sets the fence area to a point, and is the area a Nearby trigger takes:
-// NEARBY reads "POINT lat lon meters" and rejects CIRCLE, so a hook or channel
-// fencing on NEARBY needs this rather than Circle. Pair it with Radius.
-func (cmd *HookCmd) Point(lat, lon float64) *HookCmd {
-	cmd.geom = []any{"POINT", lat, lon}
-	return cmd
-}
-
-// Radius sets the trailing metres of a Point area. Named for the value it
-// carries: Tile38 has no keyword for it, it is the last argument of
-// "POINT lat lon meters".
-func (cmd *HookCmd) Radius(metres int) *HookCmd {
-	cmd.radius = &metres
-	return cmd
-}
-
-// Object sets the fence area to an inline GeoJSON string.
-func (cmd *HookCmd) Object(geojson string) *HookCmd {
-	cmd.geom = []any{"OBJECT", geojson}
-	return cmd
-}
-
-// Sector sets the search area to a circular sector: a circle of radius metres
-// centred on lat/lon, clipped to the arc between two compass bearings in
-// degrees. Matches Tile38's SECTOR keyword, which NEARBY does not accept.
-func (cmd *HookCmd) Sector(lat, lon float64, metres int, bearing1, bearing2 float64) *HookCmd {
-	cmd.geom = []any{"SECTOR", lat, lon, metres, bearing1, bearing2}
-	return cmd
-}
-
-// Hash sets the search area to the box a geohash covers, matching Tile38's HASH
-// keyword. The shorter the hash, the larger the box.
-func (cmd *HookCmd) Hash(geohash string) *HookCmd {
-	cmd.geom = []any{"HASH", geohash}
-	return cmd
-}
-
-// QuadKey sets the search area to the tile a Bing Maps quadkey names, matching
-// Tile38's QUADKEY keyword. Tile is the same area expressed as x/y/z.
-func (cmd *HookCmd) QuadKey(quadkey string) *HookCmd {
-	cmd.geom = []any{"QUADKEY", quadkey}
-	return cmd
-}
-
-// Get sets the fence area to an object already stored in Tile38.
-func (cmd *HookCmd) Get(collection, id string) *HookCmd {
-	cmd.geom = []any{"GET", collection, id}
-	return cmd
-}
-
 // Do executes the SETHOOK command.
 func (cmd *HookCmd) Do(ctx context.Context) error {
 	head := hookHead([]any{"SETHOOK", cmd.name, strings.Join(cmd.endpoints, ",")}, cmd.meta, cmd.ex)
-	head = append(head, cmd.trigger...)
-	args := buildSearch(append(head, cmd.args...), searchOpts{},
-		fenceTokens(cmd.distance, cmd.detect, cmd.commands, cmd.nodwell), nil,
-		pointGeometry(cmd.geom, cmd.radius))
-	if _, err := cmd.c.do(ctx, args...); err != nil {
+	if _, err := cmd.c.do(ctx, cmd.buildFence(head)...); err != nil {
 		return fmt.Errorf("tile38: SETHOOK: %w", err)
 	}
 	return nil

@@ -87,7 +87,10 @@ func (c *Client) Intersects(collection string) *IntersectsCmd[string] {
 
 // SetHook starts building a Tile38 SETHOOK command for the given hook name.
 func (c *Client) SetHook(hookName string) *HookCmd {
-	return &HookCmd{c: c, name: hookName}
+	cmd := &HookCmd{}
+	cmd.fenceState = fenceState{c: c, name: hookName}
+	cmd.self = cmd
+	return cmd
 }
 
 // DelHook starts building a Tile38 DELHOOK command for the given hook name.
@@ -166,7 +169,10 @@ func (c *Client) FlushDB() *FlushDBCmd {
 
 // SetChan starts building a Tile38 SETCHAN command for a pub/sub geofence channel.
 func (c *Client) SetChan(channelName string) *SetChanCmd {
-	return &SetChanCmd{c: c, name: channelName}
+	cmd := &SetChanCmd{}
+	cmd.fenceState = fenceState{c: c, name: channelName}
+	cmd.self = cmd
+	return cmd
 }
 
 // DelChan starts building a Tile38 DELCHAN command.

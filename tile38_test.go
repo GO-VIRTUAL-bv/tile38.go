@@ -569,6 +569,47 @@ func TestHookAssembly(t *testing.T) {
 	}
 }
 
+// SETHOOK and SETCHAN share fenceBase, so one chain has to emit one fence
+// grammar — only the head differs. This is what stops the two drifting apart
+// again: before the base, a fix to one had to be made twice.
+func TestHookAndChanShareTheFenceGrammar(t *testing.T) {
+	capture := func(build func(*Client) error) []string {
+		t.Helper()
+		got := make(chan []string, 1)
+		addr := fakeServer(t, func(r *bufio.Reader, w net.Conn) {
+			got <- readCommand(t, r)
+			_, _ = io.WriteString(w, "+OK\r\n")
+		})
+		c := New(addr)
+		defer c.Close()
+		if err := build(c); err != nil {
+			t.Fatal(err)
+		}
+		return <-got
+	}
+
+	hook := capture(func(c *Client) error {
+		return c.SetHook("f").EndpointURL("http://x").Meta("k", "v").EX(60).
+			Nearby("fleet").Where("speed > 10").Distance().NoDwell().
+			Detect(Enter, Exit).Commands(CommandSet).
+			Point(33.5, -115.5).Radius(5000).Do(t.Context())
+	})
+	chn := capture(func(c *Client) error {
+		return c.SetChan("f").Meta("k", "v").EX(60).
+			Nearby("fleet").Where("speed > 10").Distance().NoDwell().
+			Detect(Enter, Exit).Commands(CommandSet).
+			Point(33.5, -115.5).Radius(5000).Do(t.Context())
+	})
+
+	// The heads differ by the endpoint SETHOOK takes positionally.
+	if hook[0] != "SETHOOK" || hook[2] != "http://x" || chn[0] != "SETCHAN" {
+		t.Fatalf("heads = %q / %q", hook[:3], chn[:2])
+	}
+	if !reflect.DeepEqual(hook[3:], chn[2:]) {
+		t.Errorf("SETHOOK tail = %q,\n   SETCHAN tail = %q", hook[3:], chn[2:])
+	}
+}
+
 // Covers the FENCE clause splice, live-message framing, and Close semantics.
 func TestFenceStream(t *testing.T) {
 	got := make(chan []string, 1)
