@@ -44,7 +44,7 @@ const DefaultTimeout = conn.DefaultTimeout
 //
 //	cmd := c.Scan("fleet")
 //	for {
-//		ids, err := cmd.IDs(ctx)
+//		ids, err := cmd.Do(ctx)
 //		if err != nil && !errors.Is(err, ErrTruncated) {
 //			return err
 //		}

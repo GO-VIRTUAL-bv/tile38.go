@@ -7,6 +7,7 @@ package tile38
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -156,51 +157,135 @@ func buildSearch(args []any, opts searchOpts, fence []any, format []string, geom
 	return append(out, geom...)
 }
 
-// The BOUNDS, HASHES and A5 output formats decode the same way for every search
-// verb, so each gets one runner rather than a copy per builder. cursorOut is the
-// builder's own cursor field, recorded for paging exactly as the older terminals
-// do it.
-
-// searchRects runs a search with the BOUNDS output format.
-func searchRects(ctx context.Context, c *Client, verb string, opts searchOpts, cursorOut *uint64, args []any) ([]RectResult, error) {
-	val, err := c.do(ctx, args...)
-	if err != nil {
-		return nil, fmt.Errorf("tile38: %s BOUNDS: %w", verb, err)
-	}
-	res, cursor, err := parseRects(verb, val)
-	if err != nil {
-		return nil, err
-	}
-	*cursorOut = cursor
-	return res, truncation(opts, cursor)
+// searchState is everything a search builder holds that does not depend on its
+// output type. The builders share it by pointer within one chain so a format
+// switch can re-wrap without copying the chain apart, and clone it when the
+// output type changes so two typed handles never mutate one another.
+type searchState struct {
+	c         *Client
+	verb      string // NEARBY, WITHIN, INTERSECTS, SCAN, SEARCH — for error text
+	args      []any  // verb, key, and repeatable options
+	opts      searchOpts
+	cursorOut uint64 // cursor from the last executed Do
+	detect    []DetectState
+	commands  []Command
+	nodwell   bool
+	distance  bool
+	geom      []any // search area, empty for SCAN and SEARCH
+	radius    *int  // trailing radius of a POINT area, NEARBY only
 }
 
-// searchHashes runs a search with the HASHES output format.
-func searchHashes(ctx context.Context, c *Client, verb string, opts searchOpts, cursorOut *uint64, args []any) ([]HashResult, error) {
-	val, err := c.do(ctx, args...)
-	if err != nil {
-		return nil, fmt.Errorf("tile38: %s HASHES: %w", verb, err)
-	}
-	res, cursor, err := parseHashes(verb, val)
-	if err != nil {
-		return nil, err
-	}
-	*cursorOut = cursor
-	return res, truncation(opts, cursor)
+// clone deep-copies the slices a builder appends to, so a format switch hands
+// back an independent chain. The pointers in opts are only ever replaced, never
+// written through, so copying the header is enough for them.
+func (s *searchState) clone() *searchState {
+	c := *s
+	c.args = slices.Clone(s.args)
+	c.geom = slices.Clone(s.geom)
+	c.detect = slices.Clone(s.detect)
+	c.commands = slices.Clone(s.commands)
+	return &c
 }
 
-// searchA5Cells runs a search with the A5 output format.
-func searchA5Cells(ctx context.Context, c *Client, verb string, opts searchOpts, cursorOut *uint64, args []any) ([]A5Result, error) {
-	val, err := c.do(ctx, args...)
-	if err != nil {
-		return nil, fmt.Errorf("tile38: %s A5: %w", verb, err)
+// geometry returns the search area with its trailing radius. SCAN and SEARCH
+// carry no area and the non-NEARBY verbs carry no radius, so this is correct
+// for every builder: pointGeometry returns geom untouched in both cases.
+func (s *searchState) geometry() []any {
+	return pointGeometry(s.geom, s.radius)
+}
+
+// execArgs assembles the command. No fence clause: Detect, Commands and
+// Distance apply to Fence alone.
+func (s *searchState) execArgs(format []string) []any {
+	return buildSearch(s.args, s.opts, nil, format, s.geometry())
+}
+
+// fenceArgs assembles the live-fence form: the FENCE clause replaces the output
+// format, and CURSOR is dropped because Tile38 rejects it alongside FENCE.
+func (s *searchState) fenceArgs() []any {
+	return buildSearch(s.args, s.opts.fenceOpts(),
+		fenceTokens(s.distance, s.detect, s.commands, s.nodwell), nil, s.geometry())
+}
+
+// format is an output format's protocol tokens plus its keyword for error text.
+// It carries no decoding: that lives on the result type, reached through the
+// builder's type parameter, which is what lets one Do serve every format.
+type format struct {
+	name   string
+	tokens []string
+}
+
+// The formats every search verb accepts. STRINGS emits no token because that
+// shape is what SEARCH returns when none is given.
+var (
+	formatIDs      = format{"IDS", []string{"IDS"}}
+	formatPoints   = format{"POINTS", []string{"POINTS"}}
+	formatDistance = format{"DISTANCE POINTS", []string{"DISTANCE", "POINTS"}}
+	formatObjects  = format{"OBJECTS", []string{"OBJECTS"}}
+	formatRects    = format{"BOUNDS", []string{"BOUNDS"}}
+	formatStrings  = format{"STRINGS", nil}
+	formatCount    = format{"COUNT", []string{"COUNT"}}
+)
+
+// DISTANCE is an option token, so formatDistance renders it ahead of the output
+// format rather than after it.
+
+func formatHashes(precision int) format {
+	return format{"HASHES", []string{"HASHES", strconv.Itoa(precision)}}
+}
+
+func formatA5Cells(level int) format {
+	return format{"A5", []string{"A5", strconv.Itoa(level)}}
+}
+
+// searchDo runs the assembled command and decodes it into T.
+//
+// T is unconstrained, so how to decode is decided by what T turns out to be.
+// Every output format satisfies results[T] and carries its own decoder; COUNT
+// is the exception, because its reply is a bare integer and int cannot hold a
+// method. The default arm is unreachable through the public API — only Client
+// builds a builder and only the format switches re-type one — and it returns
+// before spending a round trip.
+func searchDo[T any](ctx context.Context, s *searchState, f format) (T, error) {
+	var zero T
+	exec := func() (any, error) {
+		val, err := s.c.do(ctx, s.execArgs(f.tokens)...)
+		if err != nil {
+			return nil, fmt.Errorf("tile38: %s %s: %w", s.verb, f.name, err)
+		}
+		return val, nil
 	}
-	res, cursor, err := parseA5Cells(verb, val)
-	if err != nil {
-		return nil, err
+
+	switch decoder := any(zero).(type) {
+	case results[T]:
+		val, err := exec()
+		if err != nil {
+			return zero, err
+		}
+		res, cursor, err := decoder.decodeReply(s.verb, val)
+		if err != nil {
+			return zero, err
+		}
+		s.cursorOut = cursor
+		return res, truncation(s.opts, cursor)
+
+	case int:
+		// COUNT replies with a bare integer: no cursor to record, and no
+		// truncation to report — the server exempts it from the result cap.
+		val, err := exec()
+		if err != nil {
+			return zero, err
+		}
+		n, err := parseCount(s.verb, val)
+		if err != nil {
+			return zero, err
+		}
+		res, _ := any(n).(T)
+		return res, nil
+
+	default:
+		return zero, fmt.Errorf("tile38: %s: %T is not a search result type", s.verb, zero)
 	}
-	*cursorOut = cursor
-	return res, truncation(opts, cursor)
 }
 
 // pointGeometry appends the trailing metres of Tile38's "POINT lat lon meters",
@@ -529,21 +614,18 @@ func (cmd *GetCmd) A5(ctx context.Context, level int) (string, error) {
 
 // NearbyCmd builds a Tile38 NEARBY command. Methods may be chained in any
 // order; the parts are assembled into protocol order when the command runs.
-type NearbyCmd struct {
-	c         *Client
-	args      []any // verb, key, and repeatable options
-	opts      searchOpts
-	cursorOut uint64 // cursor from the last executed terminal
-	detect    []DetectState
-	commands  []Command
-	nodwell   bool
-	distance  bool
-	geom      []any // POINT lat lon, or ROAM key pattern metres
-	radius    *int  // trailing radius, in metres
+//
+// The type parameter is the result type Do returns. A fresh command is
+// NearbyCmd[string] and emits IDS; an output-format method — Points, Objects,
+// Rects, Hashes, A5Cells, PointsWithDistance — hands back a command at the
+// matching type. Options chain the same either side of that switch.
+type NearbyCmd[T any] struct {
+	*searchState
+	out format
 }
 
 // Limit caps the number of results. Zero means no limit.
-func (cmd *NearbyCmd) Limit(n int) *NearbyCmd {
+func (cmd *NearbyCmd[T]) Limit(n int) *NearbyCmd[T] {
 	cmd.opts.limit = &n
 	return cmd
 }
@@ -552,56 +634,56 @@ func (cmd *NearbyCmd) Limit(n int) *NearbyCmd {
 // CURSOR keyword. Pass the value NextCursor reported. Setting it also means the
 // caller is paging deliberately, so a truncated result no longer reports
 // ErrTruncated. Tile38 rejects CURSOR on a fence, so Fence ignores it.
-func (cmd *NearbyCmd) Cursor(n uint64) *NearbyCmd {
+func (cmd *NearbyCmd[T]) Cursor(n uint64) *NearbyCmd[T] {
 	cmd.opts.cursor = &n
 	return cmd
 }
 
-// NextCursor reports where to resume after the last executed terminal. It is
-// non-zero only when Tile38 stopped at the limit with more objects matching.
-func (cmd *NearbyCmd) NextCursor() uint64 { return cmd.cursorOut }
+// NextCursor reports where to resume after the last executed Do. It is non-zero
+// only when Tile38 stopped at the limit with more objects matching.
+func (cmd *NearbyCmd[T]) NextCursor() uint64 { return cmd.cursorOut }
 
 // Where sets an optional Tile38 field expression filter.
-func (cmd *NearbyCmd) Where(expr string) *NearbyCmd {
+func (cmd *NearbyCmd[T]) Where(expr string) *NearbyCmd[T] {
 	cmd.args = append(cmd.args, "WHERE", expr)
 	return cmd
 }
 
 // Match filters results by ID pattern (glob-style, e.g. "truck:*").
-func (cmd *NearbyCmd) Match(pattern string) *NearbyCmd {
+func (cmd *NearbyCmd[T]) Match(pattern string) *NearbyCmd[T] {
 	cmd.args = append(cmd.args, "MATCH", pattern)
 	return cmd
 }
 
 // WhereIn keeps results whose field holds one of the given values, matching
 // Tile38's WHEREIN keyword. It accumulates: each call adds another filter.
-func (cmd *NearbyCmd) WhereIn(field string, values ...any) *NearbyCmd {
+func (cmd *NearbyCmd[T]) WhereIn(field string, values ...any) *NearbyCmd[T] {
 	cmd.args = append(cmd.args, whereInTokens(field, values)...)
 	return cmd
 }
 
 // NoFields drops field values from the reply, matching Tile38's NOFIELDS keyword.
-func (cmd *NearbyCmd) NoFields() *NearbyCmd {
+func (cmd *NearbyCmd[T]) NoFields() *NearbyCmd[T] {
 	cmd.opts.nofields = true
 	return cmd
 }
 
 // Sparse spreads results evenly over the search area at the given depth (1-8),
 // matching Tile38's SPARSE keyword. Tile38 rejects SPARSE combined with Limit.
-func (cmd *NearbyCmd) Sparse(depth int) *NearbyCmd {
+func (cmd *NearbyCmd[T]) Sparse(depth int) *NearbyCmd[T] {
 	cmd.opts.sparse = &depth
 	return cmd
 }
 
 // Detect restricts a live fence to the given transitions. Only meaningful with Fence.
-func (cmd *NearbyCmd) Detect(states ...DetectState) *NearbyCmd {
+func (cmd *NearbyCmd[T]) Detect(states ...DetectState) *NearbyCmd[T] {
 	cmd.detect = states
 	return cmd
 }
 
 // Commands restricts a live fence to events caused by the given commands.
 // Only meaningful with Fence.
-func (cmd *NearbyCmd) Commands(commands ...Command) *NearbyCmd {
+func (cmd *NearbyCmd[T]) Commands(commands ...Command) *NearbyCmd[T] {
 	cmd.commands = commands
 	return cmd
 }
@@ -610,7 +692,7 @@ func (cmd *NearbyCmd) Commands(commands ...Command) *NearbyCmd {
 // fence produces, matching Tile38's DISTANCE keyword. It arrives on FenceEvent
 // as Distance, and applies to the live fence only — a plain query reads the same
 // value through PointsWithDistance.
-func (cmd *NearbyCmd) Distance() *NearbyCmd {
+func (cmd *NearbyCmd[T]) Distance() *NearbyCmd[T] {
 	cmd.distance = true
 	return cmd
 }
@@ -618,36 +700,36 @@ func (cmd *NearbyCmd) Distance() *NearbyCmd {
 // WhereEval keeps results for which the given Lua script returns true, matching
 // Tile38's WHEREEVAL keyword. The script sees the object's fields as FIELDS and
 // the extra arguments as ARGV. It accumulates: each call adds another filter.
-func (cmd *NearbyCmd) WhereEval(script string, args ...any) *NearbyCmd {
+func (cmd *NearbyCmd[T]) WhereEval(script string, args ...any) *NearbyCmd[T] {
 	cmd.args = append(cmd.args, countedTokens("WHEREEVAL", script, args)...)
 	return cmd
 }
 
 // WhereEvalSha is WhereEval against a script already loaded on the server,
 // matching Tile38's WHEREEVALSHA keyword.
-func (cmd *NearbyCmd) WhereEvalSha(sha string, args ...any) *NearbyCmd {
+func (cmd *NearbyCmd[T]) WhereEvalSha(sha string, args ...any) *NearbyCmd[T] {
 	cmd.args = append(cmd.args, countedTokens("WHEREEVALSHA", sha, args)...)
 	return cmd
 }
 
 // Point sets the centre coordinates.
-func (cmd *NearbyCmd) Point(lat, lon float64) *NearbyCmd {
+func (cmd *NearbyCmd[T]) Point(lat, lon float64) *NearbyCmd[T] {
 	cmd.geom = []any{"POINT", lat, lon}
 	return cmd
 }
 
 // Radius sets the search radius in metres. It applies to a Point area; a Roam
 // area carries its own radius.
-func (cmd *NearbyCmd) Radius(metres int) *NearbyCmd {
+func (cmd *NearbyCmd[T]) Radius(metres int) *NearbyCmd[T] {
 	cmd.radius = &metres
 	return cmd
 }
 
 // Roam turns the fence into a roaming one: it fires as objects in this
 // collection move within radiusM metres of an object in collection. Tile38
-// accepts ROAM only on a live NEARBY fence, so this needs Fence — the plain
-// query terminators will be rejected by the server.
-func (cmd *NearbyCmd) Roam(collection string, radiusM int) *NearbyCmd {
+// accepts ROAM only on a live NEARBY fence, so this needs Fence — Do will be
+// rejected by the server.
+func (cmd *NearbyCmd[T]) Roam(collection string, radiusM int) *NearbyCmd[T] {
 	cmd.geom = []any{"ROAM", collection, "*", radiusM}
 	return cmd
 }
@@ -655,165 +737,126 @@ func (cmd *NearbyCmd) Roam(collection string, radiusM int) *NearbyCmd {
 // NoDwell stops a roaming fence from re-reporting objects that stay within
 // range between updates, matching Tile38's NODWELL keyword. It only affects
 // Roam fences.
-func (cmd *NearbyCmd) NoDwell() *NearbyCmd {
+func (cmd *NearbyCmd[T]) NoDwell() *NearbyCmd[T] {
 	cmd.nodwell = true
 	return cmd
 }
 
-// geometry returns the search area with its trailing radius.
-func (cmd *NearbyCmd) geometry() []any {
-	return pointGeometry(cmd.geom, cmd.radius)
+// IDs selects the IDS output format: NEARBY collection [opts] IDS POINT lat lon radius.
+// It is what a fresh command already emits, and is here to switch back.
+func (cmd *NearbyCmd[T]) IDs() *NearbyCmd[IDs] {
+	return &NearbyCmd[IDs]{cmd.clone(), formatIDs}
 }
 
-func (cmd *NearbyCmd) execArgs(format ...string) []any {
-	// No fence clause: Detect and Commands only apply to Fence.
-	return buildSearch(cmd.args, cmd.opts, nil, format, cmd.geometry())
+// Points selects the POINTS output format: NEARBY collection [opts] POINTS POINT lat lon radius.
+func (cmd *NearbyCmd[T]) Points() *NearbyCmd[Points] {
+	return &NearbyCmd[Points]{cmd.clone(), formatPoints}
 }
 
-// IDs executes: NEARBY collection [opts] IDS POINT lat lon radius
-func (cmd *NearbyCmd) IDs(ctx context.Context) ([]string, error) {
-	val, err := cmd.c.do(ctx, cmd.execArgs("IDS")...)
-	if err != nil {
-		return nil, fmt.Errorf("tile38: NEARBY IDs: %w", err)
-	}
-	res, cursor, err := parseScanIDs(val)
-	if err != nil {
-		return nil, err
-	}
-	cmd.cursorOut = cursor
-	return res, truncation(cmd.opts, cursor)
-}
-
-// Points executes: NEARBY collection [opts] POINTS POINT lat lon radius
-func (cmd *NearbyCmd) Points(ctx context.Context) ([]NearbyResult, error) {
-	val, err := cmd.c.do(ctx, cmd.execArgs("POINTS")...)
-	if err != nil {
-		return nil, fmt.Errorf("tile38: NEARBY POINTS: %w", err)
-	}
-	res, cursor, err := parseNearbyPoints(val)
-	if err != nil {
-		return nil, err
-	}
-	cmd.cursorOut = cursor
-	return res, truncation(cmd.opts, cursor)
-}
-
-// PointsWithDistance executes: NEARBY collection [opts] DISTANCE POINTS POINT lat lon radius
+// PointsWithDistance selects POINTS with each object's distance from the search
+// centre: NEARBY collection [opts] DISTANCE POINTS POINT lat lon radius.
 // DISTANCE is an option token, so it has to precede the output format.
-func (cmd *NearbyCmd) PointsWithDistance(ctx context.Context) ([]NearbyResultWithDistance, error) {
-	val, err := cmd.c.do(ctx, cmd.execArgs("DISTANCE", "POINTS")...)
-	if err != nil {
-		return nil, fmt.Errorf("tile38: NEARBY DISTANCE POINTS: %w", err)
-	}
-	res, cursor, err := parsePointsWithDistance(val)
-	if err != nil {
-		return nil, err
-	}
-	cmd.cursorOut = cursor
-	return res, truncation(cmd.opts, cursor)
+func (cmd *NearbyCmd[T]) PointsWithDistance() *NearbyCmd[PointsWithDistance] {
+	return &NearbyCmd[PointsWithDistance]{cmd.clone(), formatDistance}
 }
 
-// Count executes: NEARBY collection [opts] COUNT POINT lat lon radius
-func (cmd *NearbyCmd) Count(ctx context.Context) (int, error) {
-	val, err := cmd.c.do(ctx, cmd.execArgs("COUNT")...)
-	if err != nil {
-		return 0, fmt.Errorf("tile38: NEARBY COUNT: %w", err)
-	}
-	return parseCount("NEARBY", val)
+// Objects selects the OBJECTS output format: NEARBY collection [opts] OBJECTS POINT lat lon radius.
+func (cmd *NearbyCmd[T]) Objects() *NearbyCmd[Objects] {
+	return &NearbyCmd[Objects]{cmd.clone(), formatObjects}
 }
 
-// Objects executes: NEARBY collection [opts] OBJECTS POINT lat lon radius
-func (cmd *NearbyCmd) Objects(ctx context.Context) ([]SearchObject, error) {
-	val, err := cmd.c.do(ctx, cmd.execArgs("OBJECTS")...)
-	if err != nil {
-		return nil, fmt.Errorf("tile38: NEARBY OBJECTS: %w", err)
-	}
-	res, cursor, err := parseObjects("NEARBY", val)
-	if err != nil {
-		return nil, err
-	}
-	cmd.cursorOut = cursor
-	return res, truncation(cmd.opts, cursor)
-}
-
-// Rects executes: NEARBY collection [opts] BOUNDS POINT lat lon radius
+// Rects selects the BOUNDS output format: NEARBY collection [opts] BOUNDS POINT lat lon radius.
 // Each result is the bounding box of a matching object, lat first.
-func (cmd *NearbyCmd) Rects(ctx context.Context) ([]RectResult, error) {
-	return searchRects(ctx, cmd.c, "NEARBY", cmd.opts, &cmd.cursorOut, cmd.execArgs("BOUNDS"))
+func (cmd *NearbyCmd[T]) Rects() *NearbyCmd[Rects] {
+	return &NearbyCmd[Rects]{cmd.clone(), formatRects}
 }
 
-// Hashes executes: NEARBY collection [opts] HASHES precision POINT lat lon radius
+// Hashes selects the HASHES output format: NEARBY collection [opts] HASHES precision POINT lat lon radius.
 // Each result is the geohash of a matching object's centre.
-func (cmd *NearbyCmd) Hashes(ctx context.Context, precision int) ([]HashResult, error) {
-	return searchHashes(ctx, cmd.c, "NEARBY", cmd.opts, &cmd.cursorOut, cmd.execArgs("HASHES", strconv.Itoa(precision)))
+func (cmd *NearbyCmd[T]) Hashes(precision int) *NearbyCmd[Hashes] {
+	return &NearbyCmd[Hashes]{cmd.clone(), formatHashes(precision)}
 }
 
-// A5Cells executes: NEARBY collection [opts] A5 level POINT lat lon radius
+// A5Cells selects the A5 output format: NEARBY collection [opts] A5 level POINT lat lon radius.
 // Each result is the A5 cell a matching object's centre falls in. Named for the
 // output rather than the keyword because A5 is already the search-area method on
 // the builders that take one. Requires a server built from upstream master.
-func (cmd *NearbyCmd) A5Cells(ctx context.Context, level int) ([]A5Result, error) {
-	return searchA5Cells(ctx, cmd.c, "NEARBY", cmd.opts, &cmd.cursorOut, cmd.execArgs("A5", strconv.Itoa(level)))
+func (cmd *NearbyCmd[T]) A5Cells(level int) *NearbyCmd[A5Cells] {
+	return &NearbyCmd[A5Cells]{cmd.clone(), formatA5Cells(level)}
+}
+
+// Do executes the command in whichever output format was selected, defaulting
+// to IDS. It reports ErrTruncated when Tile38 capped an unbounded search.
+func (cmd *NearbyCmd[T]) Do(ctx context.Context) (T, error) {
+	return searchDo[T](ctx, cmd.searchState, cmd.out)
+}
+
+// Count selects the COUNT output format: NEARBY collection [opts] COUNT POINT lat lon radius.
+// Do then returns the number of matching objects.
+//
+// COUNT is the one format whose reply is a bare integer rather than a cursor
+// and a list, so it reports no truncation: the server exempts it from the
+// hundred-result cap that ErrTruncated exists to surface.
+func (cmd *NearbyCmd[T]) Count() *NearbyCmd[int] {
+	return &NearbyCmd[int]{cmd.clone(), formatCount}
 }
 
 // Fence opens a live geofence: NEARBY collection [opts] FENCE [DETECT …] POINT lat lon radius.
 // The returned Stream holds a dedicated connection and delivers events until it
 // is closed or ctx is cancelled.
-func (cmd *NearbyCmd) Fence(ctx context.Context) (*Stream, error) {
-	args := buildSearch(cmd.args, cmd.opts.fenceOpts(),
-		fenceTokens(cmd.distance, cmd.detect, cmd.commands, cmd.nodwell), nil, cmd.geometry())
-	return cmd.c.fenceStream(ctx, args)
+func (cmd *NearbyCmd[T]) Fence(ctx context.Context) (*Stream, error) {
+	return cmd.c.fenceStream(ctx, cmd.fenceArgs())
 }
 
 // ScanCmd builds a Tile38 SCAN command.
-type ScanCmd struct {
-	c         *Client
-	args      []any // verb, key, and repeatable options
-	opts      searchOpts
-	cursorOut uint64 // cursor from the last executed terminal
+//
+// The type parameter is the result type Do returns; see NearbyCmd. SCAN takes
+// no search area and no fence.
+type ScanCmd[T any] struct {
+	*searchState
+	out format
 }
 
 // Limit caps the number of results. Zero means no limit.
-func (cmd *ScanCmd) Limit(n int) *ScanCmd {
+func (cmd *ScanCmd[T]) Limit(n int) *ScanCmd[T] {
 	cmd.opts.limit = &n
 	return cmd
 }
 
-// Cursor resumes a search from where a previous one stopped, matching Tile38's
+// Cursor resumes a scan from where a previous one stopped, matching Tile38's
 // CURSOR keyword. Pass the value NextCursor reported. Setting it also means the
 // caller is paging deliberately, so a truncated result no longer reports
-// ErrTruncated. Tile38 rejects CURSOR on a fence, so Fence ignores it.
-func (cmd *ScanCmd) Cursor(n uint64) *ScanCmd {
+// ErrTruncated.
+func (cmd *ScanCmd[T]) Cursor(n uint64) *ScanCmd[T] {
 	cmd.opts.cursor = &n
 	return cmd
 }
 
-// NextCursor reports where to resume after the last executed terminal. It is
-// non-zero only when Tile38 stopped at the limit with more objects matching.
-func (cmd *ScanCmd) NextCursor() uint64 { return cmd.cursorOut }
+// NextCursor reports where to resume after the last executed Do. It is non-zero
+// only when Tile38 stopped at the limit with more objects matching.
+func (cmd *ScanCmd[T]) NextCursor() uint64 { return cmd.cursorOut }
 
 // Match filters results by ID pattern (glob-style, e.g. "truck:*").
-func (cmd *ScanCmd) Match(pattern string) *ScanCmd {
+func (cmd *ScanCmd[T]) Match(pattern string) *ScanCmd[T] {
 	cmd.args = append(cmd.args, "MATCH", pattern)
 	return cmd
 }
 
 // Where sets an optional Tile38 field expression filter.
-func (cmd *ScanCmd) Where(expr string) *ScanCmd {
+func (cmd *ScanCmd[T]) Where(expr string) *ScanCmd[T] {
 	cmd.args = append(cmd.args, "WHERE", expr)
 	return cmd
 }
 
 // WhereIn keeps results whose field holds one of the given values, matching
 // Tile38's WHEREIN keyword. It accumulates: each call adds another filter.
-func (cmd *ScanCmd) WhereIn(field string, values ...any) *ScanCmd {
+func (cmd *ScanCmd[T]) WhereIn(field string, values ...any) *ScanCmd[T] {
 	cmd.args = append(cmd.args, whereInTokens(field, values)...)
 	return cmd
 }
 
 // NoFields drops field values from the reply, matching Tile38's NOFIELDS keyword.
-// SCAN takes no SPARSE — Tile38 rejects it for this command.
-func (cmd *ScanCmd) NoFields() *ScanCmd {
+func (cmd *ScanCmd[T]) NoFields() *ScanCmd[T] {
 	cmd.opts.nofields = true
 	return cmd
 }
@@ -822,7 +865,7 @@ func (cmd *ScanCmd) NoFields() *ScanCmd {
 // Only SCAN and SEARCH take an order — the spatial verbs answer
 // "ASC is not allowed for NEARBY". Asc and Desc overwrite each other: Tile38
 // rejects a command carrying both.
-func (cmd *ScanCmd) Asc() *ScanCmd {
+func (cmd *ScanCmd[T]) Asc() *ScanCmd[T] {
 	order := "ASC"
 	cmd.opts.order = &order
 	return cmd
@@ -830,7 +873,7 @@ func (cmd *ScanCmd) Asc() *ScanCmd {
 
 // Desc returns results in descending ID order, matching Tile38's DESC keyword.
 // See Asc for why it is single-use.
-func (cmd *ScanCmd) Desc() *ScanCmd {
+func (cmd *ScanCmd[T]) Desc() *ScanCmd[T] {
 	order := "DESC"
 	cmd.opts.order = &order
 	return cmd
@@ -839,217 +882,177 @@ func (cmd *ScanCmd) Desc() *ScanCmd {
 // WhereEval keeps results for which the given Lua script returns true, matching
 // Tile38's WHEREEVAL keyword. The script sees the object's fields as FIELDS and
 // the extra arguments as ARGV. It accumulates: each call adds another filter.
-func (cmd *ScanCmd) WhereEval(script string, args ...any) *ScanCmd {
+func (cmd *ScanCmd[T]) WhereEval(script string, args ...any) *ScanCmd[T] {
 	cmd.args = append(cmd.args, countedTokens("WHEREEVAL", script, args)...)
 	return cmd
 }
 
 // WhereEvalSha is WhereEval against a script already loaded on the server,
 // matching Tile38's WHEREEVALSHA keyword.
-func (cmd *ScanCmd) WhereEvalSha(sha string, args ...any) *ScanCmd {
+func (cmd *ScanCmd[T]) WhereEvalSha(sha string, args ...any) *ScanCmd[T] {
 	cmd.args = append(cmd.args, countedTokens("WHEREEVALSHA", sha, args)...)
 	return cmd
 }
 
-// SCAN takes no fence clause and no geometry, but it still has to render LIMIT
-// through buildSearch — appending the output format directly would drop it.
-func (cmd *ScanCmd) execArgs(format ...string) []any {
-	return buildSearch(cmd.args, cmd.opts, nil, format, nil)
+// IDs selects the IDS output format: SCAN collection [opts] IDS.
+// It is what a fresh command already emits, and is here to switch back.
+func (cmd *ScanCmd[T]) IDs() *ScanCmd[IDs] {
+	return &ScanCmd[IDs]{cmd.clone(), formatIDs}
 }
 
-// IDs executes: SCAN collection [opts] IDS
-func (cmd *ScanCmd) IDs(ctx context.Context) ([]string, error) {
-	val, err := cmd.c.do(ctx, cmd.execArgs("IDS")...)
-	if err != nil {
-		return nil, fmt.Errorf("tile38: SCAN IDs: %w", err)
-	}
-	res, cursor, err := parseScanIDs(val)
-	if err != nil {
-		return nil, err
-	}
-	cmd.cursorOut = cursor
-	return res, truncation(cmd.opts, cursor)
+// Points selects the POINTS output format: SCAN collection [opts] POINTS.
+func (cmd *ScanCmd[T]) Points() *ScanCmd[Points] {
+	return &ScanCmd[Points]{cmd.clone(), formatPoints}
 }
 
-// Points executes: SCAN collection [opts] POINTS
-func (cmd *ScanCmd) Points(ctx context.Context) ([]NearbyResult, error) {
-	val, err := cmd.c.do(ctx, cmd.execArgs("POINTS")...)
-	if err != nil {
-		return nil, fmt.Errorf("tile38: SCAN POINTS: %w", err)
-	}
-	res, cursor, err := parseScanPoints(val)
-	if err != nil {
-		return nil, err
-	}
-	cmd.cursorOut = cursor
-	return res, truncation(cmd.opts, cursor)
+// Objects selects the OBJECTS output format: SCAN collection [opts] OBJECTS.
+func (cmd *ScanCmd[T]) Objects() *ScanCmd[Objects] {
+	return &ScanCmd[Objects]{cmd.clone(), formatObjects}
 }
 
-// Count executes: SCAN collection [opts] COUNT
-func (cmd *ScanCmd) Count(ctx context.Context) (int, error) {
-	val, err := cmd.c.do(ctx, cmd.execArgs("COUNT")...)
-	if err != nil {
-		return 0, fmt.Errorf("tile38: SCAN COUNT: %w", err)
-	}
-	return parseCount("SCAN", val)
-}
-
-// Objects executes: SCAN collection [opts] OBJECTS
-func (cmd *ScanCmd) Objects(ctx context.Context) ([]SearchObject, error) {
-	val, err := cmd.c.do(ctx, cmd.execArgs("OBJECTS")...)
-	if err != nil {
-		return nil, fmt.Errorf("tile38: SCAN OBJECTS: %w", err)
-	}
-	res, cursor, err := parseObjects("SCAN", val)
-	if err != nil {
-		return nil, err
-	}
-	cmd.cursorOut = cursor
-	return res, truncation(cmd.opts, cursor)
-}
-
-// Rects executes: SCAN collection [opts] BOUNDS
+// Rects selects the BOUNDS output format: SCAN collection [opts] BOUNDS.
 // Each result is the bounding box of a matching object, lat first.
-func (cmd *ScanCmd) Rects(ctx context.Context) ([]RectResult, error) {
-	return searchRects(ctx, cmd.c, "SCAN", cmd.opts, &cmd.cursorOut, cmd.execArgs("BOUNDS"))
+func (cmd *ScanCmd[T]) Rects() *ScanCmd[Rects] {
+	return &ScanCmd[Rects]{cmd.clone(), formatRects}
 }
 
-// Hashes executes: SCAN collection [opts] HASHES precision
+// Hashes selects the HASHES output format: SCAN collection [opts] HASHES precision.
 // Each result is the geohash of a matching object's centre.
-func (cmd *ScanCmd) Hashes(ctx context.Context, precision int) ([]HashResult, error) {
-	return searchHashes(ctx, cmd.c, "SCAN", cmd.opts, &cmd.cursorOut, cmd.execArgs("HASHES", strconv.Itoa(precision)))
+func (cmd *ScanCmd[T]) Hashes(precision int) *ScanCmd[Hashes] {
+	return &ScanCmd[Hashes]{cmd.clone(), formatHashes(precision)}
 }
 
-// A5Cells executes: SCAN collection [opts] A5 level
-// Each result is the A5 cell a matching object's centre falls in. Named for the
-// output rather than the keyword because A5 is already the search-area method on
-// the builders that take one. Requires a server built from upstream master.
-func (cmd *ScanCmd) A5Cells(ctx context.Context, level int) ([]A5Result, error) {
-	return searchA5Cells(ctx, cmd.c, "SCAN", cmd.opts, &cmd.cursorOut, cmd.execArgs("A5", strconv.Itoa(level)))
+// A5Cells selects the A5 output format: SCAN collection [opts] A5 level.
+// Requires a server built from upstream master.
+func (cmd *ScanCmd[T]) A5Cells(level int) *ScanCmd[A5Cells] {
+	return &ScanCmd[A5Cells]{cmd.clone(), formatA5Cells(level)}
+}
+
+// Do executes the command in whichever output format was selected, defaulting
+// to IDS. It reports ErrTruncated when Tile38 capped an unbounded scan.
+func (cmd *ScanCmd[T]) Do(ctx context.Context) (T, error) {
+	return searchDo[T](ctx, cmd.searchState, cmd.out)
+}
+
+// Count selects the COUNT output format: SCAN collection [opts] COUNT.
+// Do then returns the number of matching objects.
+//
+// COUNT is the one format whose reply is a bare integer rather than a cursor
+// and a list, so it reports no truncation: the server exempts it from the
+// hundred-result cap that ErrTruncated exists to surface.
+func (cmd *ScanCmd[T]) Count() *ScanCmd[int] {
+	return &ScanCmd[int]{cmd.clone(), formatCount}
 }
 
 // SearchCmd builds a Tile38 SEARCH command, which matches on the string values
 // "SET … STRING" stores rather than on geometry. It takes no area and no fence.
-type SearchCmd struct {
-	c         *Client
-	args      []any // verb, key, and repeatable options
-	opts      searchOpts
-	cursorOut uint64 // cursor from the last executed terminal
+//
+// The type parameter is the result type Do returns; see NearbyCmd. A fresh
+// command emits IDS; Strings selects SEARCH's own default output, which carries
+// each object's string value.
+type SearchCmd[T any] struct {
+	*searchState
+	out format
 }
 
 // Limit caps the number of results. Zero means no limit.
-func (cmd *SearchCmd) Limit(n int) *SearchCmd {
+func (cmd *SearchCmd[T]) Limit(n int) *SearchCmd[T] {
 	cmd.opts.limit = &n
 	return cmd
 }
 
 // Cursor resumes a search from where a previous one stopped, matching Tile38's
 // CURSOR keyword. Pass the value NextCursor reported.
-func (cmd *SearchCmd) Cursor(n uint64) *SearchCmd {
+func (cmd *SearchCmd[T]) Cursor(n uint64) *SearchCmd[T] {
 	cmd.opts.cursor = &n
 	return cmd
 }
 
-// NextCursor reports where to resume after the last executed terminal. It is
-// non-zero only when Tile38 stopped at the limit with more objects matching.
-func (cmd *SearchCmd) NextCursor() uint64 { return cmd.cursorOut }
+// NextCursor reports where to resume after the last executed Do.
+func (cmd *SearchCmd[T]) NextCursor() uint64 { return cmd.cursorOut }
 
-// Match filters results by string value (glob-style, e.g. "*hello*"), matching
-// Tile38's MATCH keyword. It accumulates: each call adds another pattern.
-func (cmd *SearchCmd) Match(pattern string) *SearchCmd {
+// Match filters results by the object's string value (glob-style).
+func (cmd *SearchCmd[T]) Match(pattern string) *SearchCmd[T] {
 	cmd.args = append(cmd.args, "MATCH", pattern)
 	return cmd
 }
 
-// Asc returns results in ascending order, matching Tile38's ASC keyword. Asc and
-// Desc overwrite each other: Tile38 rejects a command carrying both.
-func (cmd *SearchCmd) Asc() *SearchCmd {
+// Asc returns results in ascending order, matching Tile38's ASC keyword.
+// Asc and Desc overwrite each other: Tile38 rejects a command carrying both.
+func (cmd *SearchCmd[T]) Asc() *SearchCmd[T] {
 	order := "ASC"
 	cmd.opts.order = &order
 	return cmd
 }
 
 // Desc returns results in descending order, matching Tile38's DESC keyword.
-func (cmd *SearchCmd) Desc() *SearchCmd {
+// See Asc for why it is single-use.
+func (cmd *SearchCmd[T]) Desc() *SearchCmd[T] {
 	order := "DESC"
 	cmd.opts.order = &order
 	return cmd
 }
 
 // Where sets an optional Tile38 field expression filter.
-func (cmd *SearchCmd) Where(expr string) *SearchCmd {
+func (cmd *SearchCmd[T]) Where(expr string) *SearchCmd[T] {
 	cmd.args = append(cmd.args, "WHERE", expr)
 	return cmd
 }
 
 // WhereIn keeps results whose field holds one of the given values, matching
 // Tile38's WHEREIN keyword. It accumulates: each call adds another filter.
-func (cmd *SearchCmd) WhereIn(field string, values ...any) *SearchCmd {
+func (cmd *SearchCmd[T]) WhereIn(field string, values ...any) *SearchCmd[T] {
 	cmd.args = append(cmd.args, whereInTokens(field, values)...)
 	return cmd
 }
 
 // WhereEval keeps results for which the given Lua script returns true, matching
 // Tile38's WHEREEVAL keyword. It accumulates: each call adds another filter.
-func (cmd *SearchCmd) WhereEval(script string, args ...any) *SearchCmd {
+func (cmd *SearchCmd[T]) WhereEval(script string, args ...any) *SearchCmd[T] {
 	cmd.args = append(cmd.args, countedTokens("WHEREEVAL", script, args)...)
 	return cmd
 }
 
 // WhereEvalSha is WhereEval against a script already loaded on the server,
 // matching Tile38's WHEREEVALSHA keyword.
-func (cmd *SearchCmd) WhereEvalSha(sha string, args ...any) *SearchCmd {
+func (cmd *SearchCmd[T]) WhereEvalSha(sha string, args ...any) *SearchCmd[T] {
 	cmd.args = append(cmd.args, countedTokens("WHEREEVALSHA", sha, args)...)
 	return cmd
 }
 
 // NoFields drops field values from the reply, matching Tile38's NOFIELDS keyword.
-func (cmd *SearchCmd) NoFields() *SearchCmd {
+func (cmd *SearchCmd[T]) NoFields() *SearchCmd[T] {
 	cmd.opts.nofields = true
 	return cmd
 }
 
-func (cmd *SearchCmd) execArgs(format ...string) []any {
-	return buildSearch(cmd.args, cmd.opts, nil, format, nil)
+// IDs selects the IDS output format: SEARCH collection [opts] IDS.
+// It is what a fresh command already emits, and is here to switch back.
+func (cmd *SearchCmd[T]) IDs() *SearchCmd[IDs] {
+	return &SearchCmd[IDs]{cmd.clone(), formatIDs}
 }
 
-// IDs executes: SEARCH collection [opts] IDS
-func (cmd *SearchCmd) IDs(ctx context.Context) ([]string, error) {
-	val, err := cmd.c.do(ctx, cmd.execArgs("IDS")...)
-	if err != nil {
-		return nil, fmt.Errorf("tile38: SEARCH IDs: %w", err)
-	}
-	res, cursor, err := parseScanIDs(val)
-	if err != nil {
-		return nil, err
-	}
-	cmd.cursorOut = cursor
-	return res, truncation(cmd.opts, cursor)
+// Strings selects SEARCH's own default output, where element 1 of each item is
+// the object's string value rather than its geometry. It emits no format token,
+// because that shape is what SEARCH returns when none is given.
+func (cmd *SearchCmd[T]) Strings() *SearchCmd[Strings] {
+	return &SearchCmd[Strings]{cmd.clone(), formatStrings}
 }
 
-// Count executes: SEARCH collection [opts] COUNT
-func (cmd *SearchCmd) Count(ctx context.Context) (int, error) {
-	val, err := cmd.c.do(ctx, cmd.execArgs("COUNT")...)
-	if err != nil {
-		return 0, fmt.Errorf("tile38: SEARCH COUNT: %w", err)
-	}
-	return parseCount("SEARCH", val)
+// Do executes the command in whichever output format was selected, defaulting
+// to IDS. It reports ErrTruncated when Tile38 capped an unbounded search.
+func (cmd *SearchCmd[T]) Do(ctx context.Context) (T, error) {
+	return searchDo[T](ctx, cmd.searchState, cmd.out)
 }
 
-// Strings executes: SEARCH collection [opts] — the default output, which pairs
-// each id with the string value that matched. Tile38 has no keyword for it, so
-// the method is named for what it returns.
-func (cmd *SearchCmd) Strings(ctx context.Context) ([]StringObject, error) {
-	val, err := cmd.c.do(ctx, cmd.execArgs()...)
-	if err != nil {
-		return nil, fmt.Errorf("tile38: SEARCH: %w", err)
-	}
-	res, cursor, err := parseStrings("SEARCH", val)
-	if err != nil {
-		return nil, err
-	}
-	cmd.cursorOut = cursor
-	return res, truncation(cmd.opts, cursor)
+// Count selects the COUNT output format: SEARCH collection [opts] COUNT.
+// Do then returns the number of matching objects.
+//
+// COUNT is the one format whose reply is a bare integer rather than a cursor
+// and a list, so it reports no truncation: the server exempts it from the
+// hundred-result cap that ErrTruncated exists to surface.
+func (cmd *SearchCmd[T]) Count() *SearchCmd[int] {
+	return &SearchCmd[int]{cmd.clone(), formatCount}
 }
 
 // FExistsCmd builds a Tile38 FEXISTS command.
@@ -1075,19 +1078,13 @@ func (cmd *FExistsCmd) Do(ctx context.Context) (bool, error) {
 
 // WithinCmd builds a Tile38 WITHIN query. Methods may be chained in any order;
 // the parts are assembled into protocol order when the command runs.
-type WithinCmd struct {
-	c         *Client
-	args      []any // verb, key, and repeatable options
-	opts      searchOpts
-	cursorOut uint64 // cursor from the last executed terminal
-	detect    []DetectState
-	commands  []Command
-	distance  bool
-	geom      []any // search area
+type WithinCmd[T any] struct {
+	*searchState
+	out format
 }
 
 // Limit caps the number of results. Zero means no limit.
-func (cmd *WithinCmd) Limit(n int) *WithinCmd {
+func (cmd *WithinCmd[T]) Limit(n int) *WithinCmd[T] {
 	cmd.opts.limit = &n
 	return cmd
 }
@@ -1096,63 +1093,63 @@ func (cmd *WithinCmd) Limit(n int) *WithinCmd {
 // CURSOR keyword. Pass the value NextCursor reported. Setting it also means the
 // caller is paging deliberately, so a truncated result no longer reports
 // ErrTruncated. Tile38 rejects CURSOR on a fence, so Fence ignores it.
-func (cmd *WithinCmd) Cursor(n uint64) *WithinCmd {
+func (cmd *WithinCmd[T]) Cursor(n uint64) *WithinCmd[T] {
 	cmd.opts.cursor = &n
 	return cmd
 }
 
 // NextCursor reports where to resume after the last executed terminal. It is
 // non-zero only when Tile38 stopped at the limit with more objects matching.
-func (cmd *WithinCmd) NextCursor() uint64 { return cmd.cursorOut }
+func (cmd *WithinCmd[T]) NextCursor() uint64 { return cmd.cursorOut }
 
 // Where sets an optional Tile38 field expression filter.
-func (cmd *WithinCmd) Where(expr string) *WithinCmd {
+func (cmd *WithinCmd[T]) Where(expr string) *WithinCmd[T] {
 	cmd.args = append(cmd.args, "WHERE", expr)
 	return cmd
 }
 
 // Match filters results by ID pattern (glob-style, e.g. "truck:*").
-func (cmd *WithinCmd) Match(pattern string) *WithinCmd {
+func (cmd *WithinCmd[T]) Match(pattern string) *WithinCmd[T] {
 	cmd.args = append(cmd.args, "MATCH", pattern)
 	return cmd
 }
 
 // WhereIn keeps results whose field holds one of the given values, matching
 // Tile38's WHEREIN keyword. It accumulates: each call adds another filter.
-func (cmd *WithinCmd) WhereIn(field string, values ...any) *WithinCmd {
+func (cmd *WithinCmd[T]) WhereIn(field string, values ...any) *WithinCmd[T] {
 	cmd.args = append(cmd.args, whereInTokens(field, values)...)
 	return cmd
 }
 
 // NoFields drops field values from the reply, matching Tile38's NOFIELDS keyword.
-func (cmd *WithinCmd) NoFields() *WithinCmd {
+func (cmd *WithinCmd[T]) NoFields() *WithinCmd[T] {
 	cmd.opts.nofields = true
 	return cmd
 }
 
 // Clip trims returned objects to the search area rather than returning them
 // whole, matching Tile38's CLIP keyword.
-func (cmd *WithinCmd) Clip() *WithinCmd {
+func (cmd *WithinCmd[T]) Clip() *WithinCmd[T] {
 	cmd.opts.clip = true
 	return cmd
 }
 
 // Sparse spreads results evenly over the search area at the given depth (1-8),
 // matching Tile38's SPARSE keyword. Tile38 rejects SPARSE combined with Limit.
-func (cmd *WithinCmd) Sparse(depth int) *WithinCmd {
+func (cmd *WithinCmd[T]) Sparse(depth int) *WithinCmd[T] {
 	cmd.opts.sparse = &depth
 	return cmd
 }
 
 // Detect restricts a live fence to the given transitions. Only meaningful with Fence.
-func (cmd *WithinCmd) Detect(states ...DetectState) *WithinCmd {
+func (cmd *WithinCmd[T]) Detect(states ...DetectState) *WithinCmd[T] {
 	cmd.detect = states
 	return cmd
 }
 
 // Commands restricts a live fence to events caused by the given commands.
 // Only meaningful with Fence.
-func (cmd *WithinCmd) Commands(commands ...Command) *WithinCmd {
+func (cmd *WithinCmd[T]) Commands(commands ...Command) *WithinCmd[T] {
 	cmd.commands = commands
 	return cmd
 }
@@ -1161,7 +1158,7 @@ func (cmd *WithinCmd) Commands(commands ...Command) *WithinCmd {
 // fence produces, matching Tile38's DISTANCE keyword. It arrives on FenceEvent
 // as Distance, and applies to the live fence only — a plain query reads the same
 // value through PointsWithDistance.
-func (cmd *WithinCmd) Distance() *WithinCmd {
+func (cmd *WithinCmd[T]) Distance() *WithinCmd[T] {
 	cmd.distance = true
 	return cmd
 }
@@ -1169,14 +1166,14 @@ func (cmd *WithinCmd) Distance() *WithinCmd {
 // WhereEval keeps results for which the given Lua script returns true, matching
 // Tile38's WHEREEVAL keyword. The script sees the object's fields as FIELDS and
 // the extra arguments as ARGV. It accumulates: each call adds another filter.
-func (cmd *WithinCmd) WhereEval(script string, args ...any) *WithinCmd {
+func (cmd *WithinCmd[T]) WhereEval(script string, args ...any) *WithinCmd[T] {
 	cmd.args = append(cmd.args, countedTokens("WHEREEVAL", script, args)...)
 	return cmd
 }
 
 // WhereEvalSha is WhereEval against a script already loaded on the server,
 // matching Tile38's WHEREEVALSHA keyword.
-func (cmd *WithinCmd) WhereEvalSha(sha string, args ...any) *WithinCmd {
+func (cmd *WithinCmd[T]) WhereEvalSha(sha string, args ...any) *WithinCmd[T] {
 	cmd.args = append(cmd.args, countedTokens("WHEREEVALSHA", sha, args)...)
 	return cmd
 }
@@ -1189,31 +1186,31 @@ func (cmd *WithinCmd) WhereEvalSha(sha string, args ...any) *WithinCmd {
 //
 // It is appended rather than stored: Tile38 has no duplicate guard for BUFFER,
 // so a repeat is legal and the last one wins.
-func (cmd *WithinCmd) Buffer(metres int) *WithinCmd {
+func (cmd *WithinCmd[T]) Buffer(metres int) *WithinCmd[T] {
 	cmd.args = append(cmd.args, "BUFFER", metres)
 	return cmd
 }
 
 // Get sets the search area to an object already stored in Tile38 (GET keyword).
-func (cmd *WithinCmd) Get(collection, id string) *WithinCmd {
+func (cmd *WithinCmd[T]) Get(collection, id string) *WithinCmd[T] {
 	cmd.geom = []any{"GET", collection, id}
 	return cmd
 }
 
 // Object sets the search area to an inline GeoJSON string (OBJECT keyword).
-func (cmd *WithinCmd) Object(geojson string) *WithinCmd {
+func (cmd *WithinCmd[T]) Object(geojson string) *WithinCmd[T] {
 	cmd.geom = []any{"OBJECT", geojson}
 	return cmd
 }
 
 // Bounds sets the search area to a lat/lon bounding box (BOUNDS keyword).
-func (cmd *WithinCmd) Bounds(swLat, swLon, neLat, neLon float64) *WithinCmd {
+func (cmd *WithinCmd[T]) Bounds(swLat, swLon, neLat, neLon float64) *WithinCmd[T] {
 	cmd.geom = []any{"BOUNDS", swLat, swLon, neLat, neLon}
 	return cmd
 }
 
 // Circle sets the search area to a circle with centre + radius in metres (CIRCLE keyword).
-func (cmd *WithinCmd) Circle(lat, lon float64, radius int) *WithinCmd {
+func (cmd *WithinCmd[T]) Circle(lat, lon float64, radius int) *WithinCmd[T] {
 	cmd.geom = []any{"CIRCLE", lat, lon, radius}
 	return cmd
 }
@@ -1222,7 +1219,7 @@ func (cmd *WithinCmd) Circle(lat, lon float64, radius int) *WithinCmd {
 // cell id (A5 keyword). Requires a server built from upstream master: A5 is
 // merged upstream but has shipped in no release tag as of 1.38.0. Tile38 accepts
 // A5 as a search area only, not as a hook or channel fence area.
-func (cmd *WithinCmd) A5(cellID string) *WithinCmd {
+func (cmd *WithinCmd[T]) A5(cellID string) *WithinCmd[T] {
 	cmd.geom = []any{"A5", cellID}
 	return cmd
 }
@@ -1230,117 +1227,87 @@ func (cmd *WithinCmd) A5(cellID string) *WithinCmd {
 // Sector sets the search area to a circular sector: a circle of radius metres
 // centred on lat/lon, clipped to the arc between two compass bearings in
 // degrees. Matches Tile38's SECTOR keyword, which NEARBY does not accept.
-func (cmd *WithinCmd) Sector(lat, lon float64, metres int, bearing1, bearing2 float64) *WithinCmd {
+func (cmd *WithinCmd[T]) Sector(lat, lon float64, metres int, bearing1, bearing2 float64) *WithinCmd[T] {
 	cmd.geom = []any{"SECTOR", lat, lon, metres, bearing1, bearing2}
 	return cmd
 }
 
 // Hash sets the search area to the box a geohash covers, matching Tile38's HASH
 // keyword. The shorter the hash, the larger the box.
-func (cmd *WithinCmd) Hash(geohash string) *WithinCmd {
+func (cmd *WithinCmd[T]) Hash(geohash string) *WithinCmd[T] {
 	cmd.geom = []any{"HASH", geohash}
 	return cmd
 }
 
 // QuadKey sets the search area to the tile a Bing Maps quadkey names, matching
 // Tile38's QUADKEY keyword. Tile is the same area expressed as x/y/z.
-func (cmd *WithinCmd) QuadKey(quadkey string) *WithinCmd {
+func (cmd *WithinCmd[T]) QuadKey(quadkey string) *WithinCmd[T] {
 	cmd.geom = []any{"QUADKEY", quadkey}
 	return cmd
 }
 
 // Tile sets the search area to a single XYZ map tile (TILE keyword).
-func (cmd *WithinCmd) Tile(x, y, z int) *WithinCmd {
+func (cmd *WithinCmd[T]) Tile(x, y, z int) *WithinCmd[T] {
 	cmd.geom = []any{"TILE", x, y, z}
 	return cmd
 }
 
-func (cmd *WithinCmd) execArgs(format ...string) []any {
-	// No fence clause: Detect and Commands only apply to Fence.
-	return buildSearch(cmd.args, cmd.opts, nil, format, cmd.geom)
+// IDs selects the IDS output format: WITHIN collection [opts] IDS <area>.
+// It is what a fresh command already emits, and is here to switch back.
+func (cmd *WithinCmd[T]) IDs() *WithinCmd[IDs] {
+	return &WithinCmd[IDs]{cmd.clone(), formatIDs}
 }
 
-// IDs executes: WITHIN collection [opts] IDS area
-func (cmd *WithinCmd) IDs(ctx context.Context) ([]string, error) {
-	val, err := cmd.c.do(ctx, cmd.execArgs("IDS")...)
-	if err != nil {
-		return nil, fmt.Errorf("tile38: WITHIN IDs: %w", err)
-	}
-	res, cursor, err := parseScanIDs(val)
-	if err != nil {
-		return nil, err
-	}
-	cmd.cursorOut = cursor
-	return res, truncation(cmd.opts, cursor)
+// Points selects the POINTS output format: WITHIN collection [opts] POINTS <area>.
+func (cmd *WithinCmd[T]) Points() *WithinCmd[Points] {
+	return &WithinCmd[Points]{cmd.clone(), formatPoints}
 }
 
-// Points executes: WITHIN collection [opts] POINTS area
-func (cmd *WithinCmd) Points(ctx context.Context) ([]NearbyResult, error) {
-	val, err := cmd.c.do(ctx, cmd.execArgs("POINTS")...)
-	if err != nil {
-		return nil, fmt.Errorf("tile38: WITHIN POINTS: %w", err)
-	}
-	res, cursor, err := parseNearbyPoints(val)
-	if err != nil {
-		return nil, err
-	}
-	cmd.cursorOut = cursor
-	return res, truncation(cmd.opts, cursor)
+// Objects selects the OBJECTS output format: WITHIN collection [opts] OBJECTS <area>.
+func (cmd *WithinCmd[T]) Objects() *WithinCmd[Objects] {
+	return &WithinCmd[Objects]{cmd.clone(), formatObjects}
 }
 
-// Count executes: WITHIN collection [opts] COUNT area
-func (cmd *WithinCmd) Count(ctx context.Context) (int, error) {
-	val, err := cmd.c.do(ctx, cmd.execArgs("COUNT")...)
-	if err != nil {
-		return 0, fmt.Errorf("tile38: WITHIN COUNT: %w", err)
-	}
-	return parseCount("WITHIN", val)
-}
-
-// Objects executes: WITHIN collection [opts] OBJECTS area
-func (cmd *WithinCmd) Objects(ctx context.Context) ([]SearchObject, error) {
-	val, err := cmd.c.do(ctx, cmd.execArgs("OBJECTS")...)
-	if err != nil {
-		return nil, fmt.Errorf("tile38: WITHIN OBJECTS: %w", err)
-	}
-	res, cursor, err := parseObjects("WITHIN", val)
-	if err != nil {
-		return nil, err
-	}
-	cmd.cursorOut = cursor
-	return res, truncation(cmd.opts, cursor)
-}
-
-// Rects executes: WITHIN collection [opts] BOUNDS <area>
+// Rects selects the BOUNDS output format: WITHIN collection [opts] BOUNDS <area>.
 // Each result is the bounding box of a matching object, lat first.
-func (cmd *WithinCmd) Rects(ctx context.Context) ([]RectResult, error) {
-	return searchRects(ctx, cmd.c, "WITHIN", cmd.opts, &cmd.cursorOut, cmd.execArgs("BOUNDS"))
+func (cmd *WithinCmd[T]) Rects() *WithinCmd[Rects] {
+	return &WithinCmd[Rects]{cmd.clone(), formatRects}
 }
 
-// Hashes executes: WITHIN collection [opts] HASHES precision <area>
+// Hashes selects the HASHES output format: WITHIN collection [opts] HASHES precision <area>.
 // Each result is the geohash of a matching object's centre.
-func (cmd *WithinCmd) Hashes(ctx context.Context, precision int) ([]HashResult, error) {
-	return searchHashes(ctx, cmd.c, "WITHIN", cmd.opts, &cmd.cursorOut, cmd.execArgs("HASHES", strconv.Itoa(precision)))
+func (cmd *WithinCmd[T]) Hashes(precision int) *WithinCmd[Hashes] {
+	return &WithinCmd[Hashes]{cmd.clone(), formatHashes(precision)}
 }
 
-// A5Cells executes: WITHIN collection [opts] A5 level <area>
-// Each result is the A5 cell a matching object's centre falls in. Named for the
-// output rather than the keyword because A5 is already the search-area method on
-// the builders that take one. Requires a server built from upstream master.
-func (cmd *WithinCmd) A5Cells(ctx context.Context, level int) ([]A5Result, error) {
-	return searchA5Cells(ctx, cmd.c, "WITHIN", cmd.opts, &cmd.cursorOut, cmd.execArgs("A5", strconv.Itoa(level)))
+// A5Cells selects the A5 output format: WITHIN collection [opts] A5 level <area>.
+// Requires a server built from upstream master.
+func (cmd *WithinCmd[T]) A5Cells(level int) *WithinCmd[A5Cells] {
+	return &WithinCmd[A5Cells]{cmd.clone(), formatA5Cells(level)}
 }
 
-// Fence opens a live geofence: WITHIN collection [opts] FENCE [DETECT …] area.
+// Do executes the command in whichever output format was selected, defaulting
+// to IDS. It reports ErrTruncated when Tile38 capped an unbounded search.
+func (cmd *WithinCmd[T]) Do(ctx context.Context) (T, error) {
+	return searchDo[T](ctx, cmd.searchState, cmd.out)
+}
+
+// Count selects the COUNT output format: WITHIN collection [opts] COUNT <area>.
+// Do then returns the number of matching objects.
+//
+// COUNT is the one format whose reply is a bare integer rather than a cursor
+// and a list, so it reports no truncation: the server exempts it from the
+// hundred-result cap that ErrTruncated exists to surface.
+func (cmd *WithinCmd[T]) Count() *WithinCmd[int] {
+	return &WithinCmd[int]{cmd.clone(), formatCount}
+}
+
+// Fence opens a live geofence: WITHIN collection [opts] FENCE [DETECT …] <area>.
 // The returned Stream holds a dedicated connection and delivers events until it
 // is closed or ctx is cancelled.
-func (cmd *WithinCmd) Fence(ctx context.Context) (*Stream, error) {
-	args := buildSearch(cmd.args, cmd.opts.fenceOpts(),
-		fenceTokens(cmd.distance, cmd.detect, cmd.commands, false), nil, cmd.geom)
-	return cmd.c.fenceStream(ctx, args)
+func (cmd *WithinCmd[T]) Fence(ctx context.Context) (*Stream, error) {
+	return cmd.c.fenceStream(ctx, cmd.fenceArgs())
 }
-
-// ── Hooks ─────────────────────────────────────────────────────────────────────
 
 // DelHookCmd builds a Tile38 DELHOOK command.
 type DelHookCmd struct {

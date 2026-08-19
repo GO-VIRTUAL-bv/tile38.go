@@ -38,15 +38,30 @@ fields; `NX`/`XX` gate on existence.
 
 Verbs: `Nearby`, `Within`, `Intersects`, `Scan`.
 
-Output terminals (each sends the command):
+A search ends in `Do(ctx)`. An output-format method decides what `Do` returns —
+it is chained, not a terminal, and may be called either side of the options:
+
+| Format | `Do` returns | underlying |
+| --- | --- | --- |
+| *(none)* | `IDs` | `[]string` — IDS is the default |
+| `IDs()` | `IDs` | `[]string` |
+| `Points()` | `Points` | `[]NearbyResult` (lat/lon + fields) |
+| `PointsWithDistance()` | `PointsWithDistance` | `[]NearbyResultWithDistance` (Nearby only) |
+| `Objects()` | `Objects` | `[]SearchObject` (raw GeoJSON) |
+| `Rects()` | `Rects` | `[]RectResult` (BOUNDS output) |
+| `Hashes(precision)` | `Hashes` | `[]HashResult` |
+| `A5Cells(level)` | `A5Cells` | `[]A5Result` |
+| `Strings()` | `Strings` | `[]StringObject` (Search only) |
+| `Count()` | `int` | bare integer; exempt from the 100 cap, never `ErrTruncated` |
+
+Each result type is a named slice, so it behaves as its underlying slice —
+range, index, `len`. Note `reflect.DeepEqual` compares types, so a test wanting
+`Points{…}` will not match `[]NearbyResult{…}`.
+
+One terminal sits outside that path, because it returns no value at all:
 
 | Terminal | Returns |
 | --- | --- |
-| `IDs(ctx)` | `[]string` |
-| `Points(ctx)` | points (lat/lon) |
-| `PointsWithDistance(ctx)` | points + distance (Nearby) |
-| `Count(ctx)` | `int` (bare integer; exempt from the 100 cap) |
-| `Objects(ctx)` | raw GeoJSON objects |
 | `Fence(ctx)` | opens a `*Stream` (live geofence) |
 
 ### Search areas
@@ -70,15 +85,17 @@ Output terminals (each sends the command):
 - `Clip()` — clip objects to the search area
 
 ```go
-pts, err  := c.Nearby("fleet").Limit(10).Point(33.5, -115.5).Radius(5000).Points(ctx)
-ids, err  := c.Nearby("fleet").Where("speed > 40").Point(33.5, -115.5).Radius(5000).IDs(ctx)
-n, err    := c.Within("fleet").Bounds(33, -116, 34, -115).Count(ctx)
-objs, err := c.Intersects("fleet").Circle(33.5, -115.5, 5000).Objects(ctx)
-near, err := c.Nearby("fleet").Point(33.5, -115.5).Radius(5000).PointsWithDistance(ctx)
-trucks, err := c.Scan("fleet").Match("truck:*").IDs(ctx)
+pts, err  := c.Nearby("fleet").Limit(10).Point(33.5, -115.5).Radius(5000).Points().Do(ctx)
+ids, err  := c.Nearby("fleet").Where("speed > 40").Point(33.5, -115.5).Radius(5000).Do(ctx)
+n, err    := c.Within("fleet").Bounds(33, -116, 34, -115).Count().Do(ctx)
+objs, err := c.Intersects("fleet").Circle(33.5, -115.5, 5000).Objects().Do(ctx)
+near, err := c.Nearby("fleet").Point(33.5, -115.5).Radius(5000).PointsWithDistance().Do(ctx)
+trucks, err := c.Scan("fleet").Match("truck:*").Do(ctx)
 ```
 
-Chain order is irrelevant — parts assemble into protocol order at exec time.
+Chain order is irrelevant — parts assemble into protocol order at exec time,
+and that includes the output format: `.Limit(10).Points()` and
+`.Points().Limit(10)` emit the same bytes.
 
 ## Live geofences
 

@@ -53,18 +53,6 @@ func parseCoords(prefix string, v any) (lat, lon, z float64, err error) {
 	return lat, lon, z, nil
 }
 
-// parseNearbyPoints parses the RESP response from NEARBY ... POINTS.
-// Tile38 returns: [cursor, [[id, [lat, lon], [field, val, …]?], ...]]
-func parseNearbyPoints(val any) ([]NearbyResult, uint64, error) {
-	return parsePoints("NearbyPoints", val)
-}
-
-// parseScanPoints parses the RESP response from SCAN ... POINTS.
-// Tile38 returns: [cursor, [[id, [lat, lon], [field, val, …]?], ...]]
-func parseScanPoints(val any) ([]NearbyResult, uint64, error) {
-	return parsePoints("ScanPoints", val)
-}
-
 // parsePoints is the shared implementation for both NEARBY and SCAN POINTS
 // responses. Both return [cursor, [[id, [lat, lon, z?], [field, val, …]?], ...]]
 // — the fields array is present only when the object has non-zero fields,
@@ -102,8 +90,8 @@ func parsePoints(prefix string, val any) ([]NearbyResult, uint64, error) {
 // Tile38 returns: [cursor, [[id, [lat, lon, z?], [field, val, …]?, dist], ...]] —
 // the fields array is present only when the object has non-zero fields, so the
 // distance is read from the end of the item rather than a fixed index.
-func parsePointsWithDistance(val any) ([]NearbyResultWithDistance, uint64, error) {
-	cursor, inner, err := searchReply("PointsWithDistance", val)
+func parsePointsWithDistance(prefix string, val any) ([]NearbyResultWithDistance, uint64, error) {
+	cursor, inner, err := searchReply(prefix+" PointsWithDistance", val)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -111,19 +99,19 @@ func parsePointsWithDistance(val any) ([]NearbyResultWithDistance, uint64, error
 	for _, item := range inner {
 		pair, ok := item.([]any)
 		if !ok || len(pair) < 3 {
-			return nil, 0, fmt.Errorf("tile38: PointsWithDistance: unexpected item shape: %T", item)
+			return nil, 0, fmt.Errorf("tile38: %s PointsWithDistance: unexpected item shape: %T", prefix, item)
 		}
 		id, ok := pair[0].(string)
 		if !ok {
-			return nil, 0, fmt.Errorf("tile38: PointsWithDistance: unexpected id type: %T", pair[0])
+			return nil, 0, fmt.Errorf("tile38: %s PointsWithDistance: unexpected id type: %T", prefix, pair[0])
 		}
-		lat, lon, z, err := parseCoords("PointsWithDistance", pair[1])
+		lat, lon, z, err := parseCoords(prefix+" PointsWithDistance", pair[1])
 		if err != nil {
 			return nil, 0, err
 		}
 		dist, err := toFloat64(pair[len(pair)-1])
 		if err != nil {
-			return nil, 0, fmt.Errorf("tile38: PointsWithDistance: dist: %w", err)
+			return nil, 0, fmt.Errorf("tile38: %s PointsWithDistance: dist: %w", prefix, err)
 		}
 		res := NearbyResultWithDistance{
 			NearbyResult: NearbyResult{ID: id, Lat: lat, Lon: lon, Z: z},
@@ -139,8 +127,8 @@ func parsePointsWithDistance(val any) ([]NearbyResultWithDistance, uint64, error
 
 // parseScanIDs parses the RESP response from SCAN ... IDS.
 // Tile38 returns: [cursor, [id1, id2, ...]] — a flat list of strings.
-func parseScanIDs(val any) ([]string, uint64, error) {
-	cursor, inner, err := searchReply("ScanIDs", val)
+func parseScanIDs(prefix string, val any) ([]string, uint64, error) {
+	cursor, inner, err := searchReply(prefix+" IDs", val)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -148,7 +136,7 @@ func parseScanIDs(val any) ([]string, uint64, error) {
 	for _, item := range inner {
 		id, ok := item.(string)
 		if !ok {
-			return nil, 0, fmt.Errorf("tile38: ScanIDs: unexpected id type: %T", item)
+			return nil, 0, fmt.Errorf("tile38: %s IDs: unexpected id type: %T", prefix, item)
 		}
 		ids = append(ids, id)
 	}
@@ -275,6 +263,64 @@ func parseRects(prefix string, val any) ([]RectResult, uint64, error) {
 		results = append(results, rect)
 	}
 	return results, cursor, nil
+}
+
+// ── Results decoding ──────────────────────────────────────────────────────────
+//
+// Each output format decodes its own reply, which is what lets one Do serve all
+// of them. The reply reaching decodeReply has already been decoded from RESP by
+// internal/resp, so it arrives as a string, int64, []any or nil rather than as
+// wire bytes; prefix is the search verb, for error text.
+
+// results is implemented by every output format below. It is unexported, and so
+// is decodeReply, so the set is closed to this package — a caller cannot add a
+// result type, and the format tokens come from the builders anyway.
+//
+// searchDo reaches it through a type assertion rather than a constraint on the
+// builders, which keeps NearbyCmd[T any] readable in godoc at the cost of
+// moving a nonsense T from a compile error to a run-time one.
+type results[T any] interface {
+	decodeReply(prefix string, reply any) (T, uint64, error)
+}
+
+func (IDs) decodeReply(prefix string, reply any) (IDs, uint64, error) {
+	res, cursor, err := parseScanIDs(prefix, reply)
+	return res, cursor, err
+}
+
+func (Points) decodeReply(prefix string, reply any) (Points, uint64, error) {
+	res, cursor, err := parsePoints(prefix+" Points", reply)
+	return Points(res), cursor, err
+}
+
+func (PointsWithDistance) decodeReply(prefix string, reply any) (PointsWithDistance, uint64, error) {
+	res, cursor, err := parsePointsWithDistance(prefix, reply)
+	return PointsWithDistance(res), cursor, err
+}
+
+func (Objects) decodeReply(prefix string, reply any) (Objects, uint64, error) {
+	res, cursor, err := parseObjects(prefix, reply)
+	return Objects(res), cursor, err
+}
+
+func (Rects) decodeReply(prefix string, reply any) (Rects, uint64, error) {
+	res, cursor, err := parseRects(prefix, reply)
+	return Rects(res), cursor, err
+}
+
+func (Hashes) decodeReply(prefix string, reply any) (Hashes, uint64, error) {
+	res, cursor, err := parseHashes(prefix, reply)
+	return Hashes(res), cursor, err
+}
+
+func (A5Cells) decodeReply(prefix string, reply any) (A5Cells, uint64, error) {
+	res, cursor, err := parseA5Cells(prefix, reply)
+	return A5Cells(res), cursor, err
+}
+
+func (Strings) decodeReply(prefix string, reply any) (Strings, uint64, error) {
+	res, cursor, err := parseStrings(prefix, reply)
+	return Strings(res), cursor, err
 }
 
 // parseFields decodes the optional FIELDS element of a search result item, which

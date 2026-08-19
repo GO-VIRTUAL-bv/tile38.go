@@ -102,6 +102,37 @@ type BoundsResult struct {
 	NE [2]float64 // {lat, lon}
 }
 
+// The output formats a search can return. Each is a plain slice, usable as one
+// — range over it, index it, pass it where its element type is wanted — and
+// carries the decoding for its own reply shape.
+
+// IDs is the IDS output: the matching object ids, and the format a search
+// returns when no other is chosen.
+type IDs []string
+
+// Points is the POINTS output: each object's centre, with its fields.
+type Points []NearbyResult
+
+// PointsWithDistance is the DISTANCE POINTS output, which adds each object's
+// distance from the search centre. Nearby only.
+type PointsWithDistance []NearbyResultWithDistance
+
+// Objects is the OBJECTS output: each object's GeoJSON, with its fields.
+type Objects []SearchObject
+
+// Rects is the BOUNDS output: each object's bounding box, lat first.
+type Rects []RectResult
+
+// Hashes is the HASHES output: each object's centre as a geohash.
+type Hashes []HashResult
+
+// A5Cells is the A5 output: the A5 cell each object's centre falls in.
+type A5Cells []A5Result
+
+// Strings is SEARCH's own default output, where each item carries the object's
+// string value rather than its geometry.
+type Strings []StringObject
+
 // CollectionStats holds the STATS counters for one collection. Exists is false
 // when the collection is not there: Tile38 answers with a null element for a
 // missing key rather than an error.

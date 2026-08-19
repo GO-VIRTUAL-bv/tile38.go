@@ -40,10 +40,17 @@ linters:
       - legacy
       - std-error-handling
     rules:
-      # Search builders (NEARBY/WITHIN/INTERSECTS) and the hook/channel builders
-      # are deliberately parallel: each command gets its own concrete type so the
-      # fluent chain stays type-safe. Collapsing the repetition behind generics
-      # or embedding would cost more than it saves.
+      # Search builders (NEARBY/WITHIN/INTERSECTS) are deliberately parallel:
+      # each command gets its own concrete type so the fluent chain stays
+      # type-safe. Generics cannot collapse them. An output-format method has to
+      # return the same builder at a different result type, and Go has no
+      # higher-kinded types, so `Self[NearbyResult]` does not typecheck
+      # ("invalid operation: Self is not a generic type"). Only their options
+      # could be shared, which is not where the repetition is.
+      #
+      # channel.go is a different case and is collapsible: SETCHAN's method set
+      # is a strict subset of SETHOOK's, with no output type parameter in the
+      # way. Tracked in #18 — drop channel.go from this exclusion once it lands.
       - linters: [dupl]
         path: (builders|intersects|channel)\.go
       # Tests read as a linear sequence of arrange/assert steps. Complexity and
