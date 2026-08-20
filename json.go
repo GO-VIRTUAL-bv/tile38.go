@@ -35,9 +35,14 @@ func (cmd *JGetCmd) Do(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("tile38: JGET: %w", err)
 	}
+	// A missing collection, object or path all null out over RESP; the -ERR
+	// spellings upstream carries are the JSON output mode's.
+	if val == nil {
+		return "", fmt.Errorf("tile38: JGET: %w", ErrIDNotFound)
+	}
 	s, ok := val.(string)
 	if !ok {
-		return "", fmt.Errorf("tile38: JGET: unexpected response type %T", val)
+		return "", fmt.Errorf("tile38: JGET: %w: response type %T", ErrUnexpectedReply, val)
 	}
 	return s, nil
 }

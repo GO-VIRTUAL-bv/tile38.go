@@ -94,7 +94,7 @@ type TTLCmd struct {
 
 // Do executes: TTL collection id
 // Returns the remaining TTL as a Duration, or -1 if the object has no expiry.
-// Returns an error if the object does not exist.
+// Returns ErrIDNotFound if the object does not exist.
 func (cmd *TTLCmd) Do(ctx context.Context) (time.Duration, error) {
 	val, err := cmd.c.do(ctx, cmd.args...)
 	if err != nil {
@@ -105,7 +105,10 @@ func (cmd *TTLCmd) Do(ctx context.Context) (time.Duration, error) {
 		return 0, err
 	}
 	if secs == -2 {
-		return 0, fmt.Errorf("tile38: TTL: object not found")
+		// Tile38 answers a TTL miss with -2 rather than an error reply.
+		// Normalising it onto ErrIDNotFound means one check covers a miss
+		// however the server chose to report it.
+		return 0, fmt.Errorf("tile38: TTL: %w", ErrIDNotFound)
 	}
 	if secs == -1 {
 		return -1, nil // sentinel: object exists but has no expiry

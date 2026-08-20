@@ -46,8 +46,8 @@ Get these from `parse.go` and the "Verified protocol quirks" section of
 `CLAUDE.md`; do not invent a shape.
 
 - **Search reply**: `[cursor, [item…]]`. Element 0 is a **cursor**, not a count —
-  non-zero means the scan was truncated and the terminals raise `ErrTruncated`.
-  To exercise the happy path use `0`.
+  non-zero means the scan was truncated and `NextCursor` reports where to
+  resume. To exercise the happy path use `0`.
 - **`COUNT`**: a bare `:n` integer. Never the array form.
 - **`DISTANCE POINTS` item**: `[id, [lat, lon], [fields…]?, dist]` — the fields
   array is present only when the object has non-zero fields, so a fixture that

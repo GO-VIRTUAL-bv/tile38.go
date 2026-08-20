@@ -116,8 +116,8 @@ coordinates arrive as bulk strings — that is why `toFloat64` accepts strings.
 For search replies, element 0 is a **cursor, not a count**: a resume offset when
 the scan hit the limit, `0` when it ran to completion. Every output except `COUNT`
 is capped at 100 items with no explicit `LIMIT`, so a non-zero cursor is the
-truncation signal — return it and let the terminal turn it into `ErrTruncated`
-via `truncation()`. `COUNT` is exempt and replies with a **bare integer**.
+truncation signal — return it so `searchDo` can record it for `NextCursor`.
+Truncation is not an error. `COUNT` is exempt and replies with a **bare integer**.
 
 If you are unsure of a reply's shape, get it instead of guessing:
 `Client.Do(ctx, args...)` sends a raw command and returns the decoded reply

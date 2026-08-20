@@ -82,6 +82,40 @@ import cycle.
 `ServerError` is a type alias for `resp.Error` so the internal codec can return
 it while callers still `errors.As` against the public name.
 
+**The not-found sentinels are `ServerError` constants, not `errors.New` values.**
+`resp.Error` is a comparable string type holding the wire text verbatim
+(`Error(body)` in `ReadReply`), so `const ErrIDNotFound ServerError = "ERR id
+not found"` is matched by `errors.Is` through plain `==` while it unwraps the
+`fmt.Errorf("tile38: GET: %w", …)` every command already applies. That is the
+whole implementation — no `Is` method, no text normalising, no call-site change.
+
+The `"ERR "` prefix is not decoration: upstream adds it in `server.go` unless the
+message's first word is all-uppercase, so a lowercase-first error like `key not
+found` always arrives prefixed. Check the exact string in
+`internal/server/token.go` before adding a sentinel; one whose text is even
+slightly off silently never matches.
+
+**There are two sentinels, not four, and that is a finding rather than an
+oversight.** `errPathNotFound` and `errIDAlreadyExists` exist upstream but are
+unreachable over RESP — see the quirk below. A sentinel that can never match is
+worse than none, because it reads as a supported branch.
+
+Both are also produced from replies that are not errors at all: `GetCmd.exec`
+turns a null into `ErrIDNotFound`, `parseBoundsResult` turns one into
+`ErrKeyNotFound`, and `TTL` turns `-2` into `ErrIDNotFound`, so a caller writes
+one check whichever way the server spelled the miss. The cost is that
+`errors.As` on those paths yields a `ServerError` the server never literally
+sent — a deliberate trade for one spelling of "missing". The guard lives in
+`GetCmd.exec` rather than in each terminal so every GET output format answers a
+miss identically.
+
+`ErrUnexpectedReply` is the opposite case and is a plain `errors.New`: the
+command was accepted and the connection is fine, but the reply did not decode.
+Every "unexpected …" site in `parse.go`, `stream.go`, `builders.go`, `json.go`,
+`geometry.go` and `server.go` wraps it, keeping its own `%T`/`%v` detail after
+the `%w`. A new decode failure wraps it too — that is what lets a caller tell a
+rejection apart from a shape mismatch, which retrying will not fix.
+
 ## Architecture
 
 **Builders** (`builders.go`, `intersects.go`, `channel.go`, `json.go`,
@@ -129,28 +163,40 @@ They were defined types while they carried `decodeReply`; with the decoder on
 the format they no longer need methods, and aliasing keeps the public names
 while letting `Do` return `[]E`.
 
-**`Iter` pages; `Do` does not.** `Do` is one round trip, one page, and
-`ErrTruncated` when the server capped it — that error is load-bearing, and
-nothing about it changed. `Iter(ctx) iter.Seq2[E, error]` follows the cursor
-instead, yielding one item at a time so the caller never sees a page boundary,
-and never reports `ErrTruncated` because truncation is its loop condition.
+**`Iter` pages; `Do` does not.** `Do` is one round trip and one page.
+`Iter(ctx) iter.Seq2[E, error]` follows the cursor instead, yielding one item at
+a time so the caller never sees a page boundary.
+
+**Truncation is not an error.** `Do` used to return `ErrTruncated` alongside a
+capped page, and it no longer does: `NextCursor` is the signal, and `Iter` is
+the way to take everything. The error was added when `Iter` did not exist and it
+was the only thing standing between a caller and silent partial results; once
+`Iter` landed the error was a second, louder rendering of a bit the caller could
+already read. It also fought the language — a non-nil error beside *valid*
+results means the reflex `if err != nil { return err }` propagates a correct
+100-result page as a failure — and it was inconsistent, since an explicit
+`Limit(100)` that truncated stayed silent while an implicit one did not.
+
+The footgun it guarded is real and did not go away: a query correct at 50
+objects returns a prefix at 150. That is now handled by documentation on every
+search verb's `Do`, which is a deliberate trade, not an oversight. Do not
+reintroduce the error without re-litigating it.
 
 `searchIter` drives `opts.cursor` on the shared `searchState` and reads
 `cursorOut` between pages, restoring the caller's own cursor when the range ends
 — otherwise a second `Iter` on one builder would resume mid-scan instead of
-starting over. An explicit `Limit` or `Cursor` bounds it to a single page, the
-same reasoning that keeps `truncation` silent there. `TestIter` pins all of it,
-including that an early `break` issues no further command.
+starting over. An explicit `Limit` or `Cursor` bounds it to a single page.
+`TestIter` pins all of it, including that an early `break` issues no further
+command.
 
 Putting `error` in the range signature rather than offering `iter.Seq[E]` plus a
 trailing `Err()` is deliberate: the second form reads better but lets a caller
-forget the check, and the whole truncation design exists to stop errors going
-unnoticed.
+forget the check.
 
 **`Count` and `Fence` are terminals, not formats.** `Count(ctx) (int, error)`
-replies with a bare integer: no element type for a builder to carry, no cursor
-to record, and no truncation to report, because the server exempts COUNT from
-the hundred-result cap. `Fence` returns a `*Stream`. Both sit outside the `Do`
+replies with a bare integer: no element type for a builder to carry and no
+cursor to record, and the hundred-result cap does not apply because the server
+exempts COUNT from it. `Fence` returns a `*Stream`. Both sit outside the `Do`
 path, and `searchCount` assembles COUNT in protocol order the same way `Do`
 does — `TestFormatSwitch` pins that the token still lands ahead of the geometry
 whichever order the options were chained in.
@@ -269,9 +315,20 @@ Do not "correct" them back without re-testing.
   command carries no `LIMIT` (`limitItems`, `internal/server/scanner.go`). The
   reply's element 0 is a **cursor**, not a count: it is a resume offset when the
   scan hit the limit and `0` when it ran to completion. That makes a non-zero
-  cursor the truncation signal, which `parse.go` returns and `searchDo` turns
-  into `ErrTruncated`. Discarding it is how a client silently returns partial
-  results once a collection grows past 100.
+  cursor the truncation signal, which `parse.go` returns and `searchDo` records
+  as `cursorOut` for `NextCursor` to report. Discarding it is how a client
+  silently returns partial results once a collection grows past 100.
+- **A miss is a null reply over RESP, not an error.** `cmdJget`
+  (`internal/server/json.go:189`) and `cmdSET`'s `nada` (`crud.go:852`) both read
+  `if msg.OutputType == JSON { return …NotFound } return resp.NullValue()`, so
+  the `key not found` / `id not found` / `path not found` / `id already exists`
+  strings in `token.go` are the **JSON/HTTP output mode's** and never reach this
+  client. Verified against `tile38:edge`: `GET`, `JGET` and `BOUNDS` null out;
+  only `FGET`, `FSET` and `RENAME` answer `-ERR`; `TTL` answers `-2`; and
+  `SET … NX` over an existing object is a **silent no-op**. That is why
+  `ErrPathNotFound` and `ErrIDExists` do not exist here — nothing in a RESP
+  client can produce them. Read a `-ERR` string out of the server source and you
+  will write a check that never fires; probe it with `Client.Do` first.
 - `COUNT` is exempt from that cap — the server sets `limit = MaxUint64` for it —
   and replies with a **bare integer**, not `[count, …]`. `parseCount`
   deliberately refuses the array form rather than reading the cursor as a count.

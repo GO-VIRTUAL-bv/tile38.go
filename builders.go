@@ -6,7 +6,6 @@ package tile38
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"iter"
 	"slices"
@@ -92,17 +91,6 @@ type searchOpts struct {
 func (o searchOpts) fenceOpts() searchOpts {
 	o.cursor = nil
 	return o
-}
-
-// truncation reports what a terminal should return alongside its results. A
-// non-zero cursor means Tile38 stopped at the limit, which is only surprising
-// when the caller never asked for a bound — an explicit Limit or Cursor means
-// they did, so it stays silent there.
-func truncation(o searchOpts, cursor uint64) error {
-	if cursor == 0 || o.limit != nil || o.cursor != nil {
-		return nil
-	}
-	return ErrTruncated
 }
 
 // tokens renders the option clause. Order within it is free: Tile38's token
@@ -260,15 +248,14 @@ func searchDo[E any](ctx context.Context, s *searchState, f format[E]) ([]E, err
 		return nil, err
 	}
 	s.cursorOut = cursor
-	return res, truncation(s.opts, cursor)
+	return res, nil
 }
 
 // searchIter pages a search to completion, yielding one item at a time so the
-// caller never sees a page boundary. Truncation is its loop condition rather
-// than an error, so it never yields ErrTruncated.
+// caller never sees a page boundary. A non-zero cursor is its loop condition.
 //
 // An explicit Limit or Cursor is the caller's own bound, so it yields that one
-// page and stops — the same reasoning that keeps truncation silent there.
+// page and stops.
 //
 // The cursor is driven on searchState and restored when the range ends, so a
 // second Iter on the same builder starts over rather than resuming mid-scan, and
@@ -283,7 +270,7 @@ func searchIter[E any](ctx context.Context, s *searchState, f format[E]) iter.Se
 
 		for {
 			items, err := searchDo(ctx, s, f)
-			if err != nil && !errors.Is(err, ErrTruncated) {
+			if err != nil {
 				var zero E
 				yield(zero, err)
 				return
@@ -554,12 +541,22 @@ func (cmd *GetCmd) exec(ctx context.Context, format ...any) (any, error) {
 		args = append(args, "WITHFIELDS")
 	}
 	val, err := cmd.c.do(ctx, append(args, format...)...)
-	if err != nil || !cmd.withFields || val == nil {
-		return val, err
+	if err != nil {
+		return nil, err
+	}
+	// Over RESP a miss is a null reply: the "id not found" text upstream
+	// carries is the JSON output mode's (internal/server/crud.go), so it never
+	// reaches this client. Reporting it here rather than in each terminal keeps
+	// every output format answering a miss the same way.
+	if val == nil {
+		return nil, ErrIDNotFound
+	}
+	if !cmd.withFields {
+		return val, nil
 	}
 	outer, ok := val.([]any)
 	if !ok || len(outer) == 0 {
-		return nil, fmt.Errorf("tile38: GET WITHFIELDS: unexpected response shape: %T", val)
+		return nil, fmt.Errorf("tile38: GET WITHFIELDS: %w: response shape %T", ErrUnexpectedReply, val)
 	}
 	cmd.fields = nil
 	if len(outer) > 1 {
@@ -593,7 +590,7 @@ func (cmd *GetCmd) Object(ctx context.Context) (string, error) {
 	}
 	s, ok := val.(string)
 	if !ok {
-		return "", fmt.Errorf("tile38: GET: unexpected response type %T", val)
+		return "", fmt.Errorf("tile38: GET: %w: response type %T", ErrUnexpectedReply, val)
 	}
 	return s, nil
 }
@@ -615,7 +612,7 @@ func (cmd *GetCmd) Hash(ctx context.Context, precision int) (string, error) {
 	}
 	s, ok := val.(string)
 	if !ok {
-		return "", fmt.Errorf("tile38: GET HASH: unexpected response type %T", val)
+		return "", fmt.Errorf("tile38: GET HASH: %w: response type %T", ErrUnexpectedReply, val)
 	}
 	return s, nil
 }
@@ -631,7 +628,7 @@ func (cmd *GetCmd) A5(ctx context.Context, level int) (string, error) {
 	}
 	s, ok := val.(string)
 	if !ok {
-		return "", fmt.Errorf("tile38: GET A5: unexpected response type %T", val)
+		return "", fmt.Errorf("tile38: GET A5: %w: response type %T", ErrUnexpectedReply, val)
 	}
 	return s, nil
 }
@@ -660,9 +657,8 @@ func (cmd *NearbyCmd[E]) Limit(n int) *NearbyCmd[E] {
 }
 
 // Cursor resumes a search from where a previous one stopped, matching Tile38's
-// CURSOR keyword. Pass the value NextCursor reported. Setting it also means the
-// caller is paging deliberately, so a truncated result no longer reports
-// ErrTruncated. Tile38 rejects CURSOR on a fence, so Fence ignores it.
+// CURSOR keyword. Pass the value NextCursor reported. Tile38 rejects CURSOR on a
+// fence, so Fence ignores it.
 func (cmd *NearbyCmd[E]) Cursor(n uint64) *NearbyCmd[E] {
 	cmd.opts.cursor = &n
 	return cmd
@@ -815,14 +811,20 @@ func (cmd *NearbyCmd[E]) A5Cells(level int) *NearbyCmd[A5Result] {
 }
 
 // Do executes the command in whichever output format was selected, defaulting
-// to IDS. It reports ErrTruncated when Tile38 capped an unbounded search.
+// to IDS. It is one round trip and returns one page.
+//
+// Tile38 caps every output except COUNT at 100 results when the command carries
+// no LIMIT (limitItems, internal/server/scanner.go), so a query that is complete
+// against a small collection quietly returns a prefix once that collection
+// grows. Truncation is not an error: NextCursor is non-zero when the server
+// stopped early, and Iter pages past the cap instead.
 func (cmd *NearbyCmd[E]) Do(ctx context.Context) ([]E, error) {
 	return searchDo(ctx, cmd.searchState, cmd.out)
 }
 
 // Iter pages the search to completion, yielding one result at a time in whichever
-// output format was selected. It never reports ErrTruncated: following the
-// cursor is what it does instead.
+// output format was selected, following the cursor itself so the hundred-result
+// cap never truncates what the caller sees.
 //
 //	for obj, err := range cmd.Objects().Iter(ctx) {
 //		if err != nil {
@@ -842,9 +844,8 @@ func (cmd *NearbyCmd[E]) Iter(ctx context.Context) iter.Seq2[E, error] {
 // It returns the number of matching objects.
 //
 // COUNT is a terminal rather than an output format: its reply is a bare
-// integer, so there is no element type for a builder to carry, and it reports
-// no truncation because the server exempts it from the hundred-result cap
-// that ErrTruncated exists to surface.
+// integer, so there is no element type for a builder to carry, and the
+// hundred-result cap does not apply: the server exempts COUNT from it.
 func (cmd *NearbyCmd[E]) Count(ctx context.Context) (int, error) {
 	return searchCount(ctx, cmd.searchState)
 }
@@ -872,9 +873,7 @@ func (cmd *ScanCmd[E]) Limit(n int) *ScanCmd[E] {
 }
 
 // Cursor resumes a scan from where a previous one stopped, matching Tile38's
-// CURSOR keyword. Pass the value NextCursor reported. Setting it also means the
-// caller is paging deliberately, so a truncated result no longer reports
-// ErrTruncated.
+// CURSOR keyword. Pass the value NextCursor reported.
 func (cmd *ScanCmd[E]) Cursor(n uint64) *ScanCmd[E] {
 	cmd.opts.cursor = &n
 	return cmd
@@ -977,14 +976,20 @@ func (cmd *ScanCmd[E]) A5Cells(level int) *ScanCmd[A5Result] {
 }
 
 // Do executes the command in whichever output format was selected, defaulting
-// to IDS. It reports ErrTruncated when Tile38 capped an unbounded scan.
+// to IDS. It is one round trip and returns one page.
+//
+// Tile38 caps every output except COUNT at 100 results when the command carries
+// no LIMIT (limitItems, internal/server/scanner.go), so a query that is complete
+// against a small collection quietly returns a prefix once that collection
+// grows. Truncation is not an error: NextCursor is non-zero when the server
+// stopped early, and Iter pages past the cap instead.
 func (cmd *ScanCmd[E]) Do(ctx context.Context) ([]E, error) {
 	return searchDo(ctx, cmd.searchState, cmd.out)
 }
 
 // Iter pages the scan to completion, yielding one result at a time in whichever
-// output format was selected. It never reports ErrTruncated: following the
-// cursor is what it does instead.
+// output format was selected, following the cursor itself so the hundred-result
+// cap never truncates what the caller sees.
 //
 //	for obj, err := range cmd.Objects().Iter(ctx) {
 //		if err != nil {
@@ -1004,9 +1009,8 @@ func (cmd *ScanCmd[E]) Iter(ctx context.Context) iter.Seq2[E, error] {
 // It returns the number of matching objects.
 //
 // COUNT is a terminal rather than an output format: its reply is a bare
-// integer, so there is no element type for a builder to carry, and it reports
-// no truncation because the server exempts it from the hundred-result cap
-// that ErrTruncated exists to surface.
+// integer, so there is no element type for a builder to carry, and the
+// hundred-result cap does not apply: the server exempts COUNT from it.
 func (cmd *ScanCmd[E]) Count(ctx context.Context) (int, error) {
 	return searchCount(ctx, cmd.searchState)
 }
@@ -1107,14 +1111,20 @@ func (cmd *SearchCmd[E]) Strings() *SearchCmd[StringObject] {
 }
 
 // Do executes the command in whichever output format was selected, defaulting
-// to IDS. It reports ErrTruncated when Tile38 capped an unbounded search.
+// to IDS. It is one round trip and returns one page.
+//
+// Tile38 caps every output except COUNT at 100 results when the command carries
+// no LIMIT (limitItems, internal/server/scanner.go), so a query that is complete
+// against a small collection quietly returns a prefix once that collection
+// grows. Truncation is not an error: NextCursor is non-zero when the server
+// stopped early, and Iter pages past the cap instead.
 func (cmd *SearchCmd[E]) Do(ctx context.Context) ([]E, error) {
 	return searchDo(ctx, cmd.searchState, cmd.out)
 }
 
 // Iter pages the search to completion, yielding one result at a time in whichever
-// output format was selected. It never reports ErrTruncated: following the
-// cursor is what it does instead.
+// output format was selected, following the cursor itself so the hundred-result
+// cap never truncates what the caller sees.
 //
 //	for obj, err := range cmd.Objects().Iter(ctx) {
 //		if err != nil {
@@ -1134,9 +1144,8 @@ func (cmd *SearchCmd[E]) Iter(ctx context.Context) iter.Seq2[E, error] {
 // It returns the number of matching objects.
 //
 // COUNT is a terminal rather than an output format: its reply is a bare
-// integer, so there is no element type for a builder to carry, and it reports
-// no truncation because the server exempts it from the hundred-result cap
-// that ErrTruncated exists to surface.
+// integer, so there is no element type for a builder to carry, and the
+// hundred-result cap does not apply: the server exempts COUNT from it.
 func (cmd *SearchCmd[E]) Count(ctx context.Context) (int, error) {
 	return searchCount(ctx, cmd.searchState)
 }
@@ -1176,9 +1185,8 @@ func (cmd *WithinCmd[E]) Limit(n int) *WithinCmd[E] {
 }
 
 // Cursor resumes a search from where a previous one stopped, matching Tile38's
-// CURSOR keyword. Pass the value NextCursor reported. Setting it also means the
-// caller is paging deliberately, so a truncated result no longer reports
-// ErrTruncated. Tile38 rejects CURSOR on a fence, so Fence ignores it.
+// CURSOR keyword. Pass the value NextCursor reported. Tile38 rejects CURSOR on a
+// fence, so Fence ignores it.
 func (cmd *WithinCmd[E]) Cursor(n uint64) *WithinCmd[E] {
 	cmd.opts.cursor = &n
 	return cmd
@@ -1373,14 +1381,20 @@ func (cmd *WithinCmd[E]) A5Cells(level int) *WithinCmd[A5Result] {
 }
 
 // Do executes the command in whichever output format was selected, defaulting
-// to IDS. It reports ErrTruncated when Tile38 capped an unbounded search.
+// to IDS. It is one round trip and returns one page.
+//
+// Tile38 caps every output except COUNT at 100 results when the command carries
+// no LIMIT (limitItems, internal/server/scanner.go), so a query that is complete
+// against a small collection quietly returns a prefix once that collection
+// grows. Truncation is not an error: NextCursor is non-zero when the server
+// stopped early, and Iter pages past the cap instead.
 func (cmd *WithinCmd[E]) Do(ctx context.Context) ([]E, error) {
 	return searchDo(ctx, cmd.searchState, cmd.out)
 }
 
 // Iter pages the search to completion, yielding one result at a time in whichever
-// output format was selected. It never reports ErrTruncated: following the
-// cursor is what it does instead.
+// output format was selected, following the cursor itself so the hundred-result
+// cap never truncates what the caller sees.
 //
 //	for obj, err := range cmd.Objects().Iter(ctx) {
 //		if err != nil {
@@ -1400,9 +1414,8 @@ func (cmd *WithinCmd[E]) Iter(ctx context.Context) iter.Seq2[E, error] {
 // It returns the number of matching objects.
 //
 // COUNT is a terminal rather than an output format: its reply is a bare
-// integer, so there is no element type for a builder to carry, and it reports
-// no truncation because the server exempts it from the hundred-result cap
-// that ErrTruncated exists to surface.
+// integer, so there is no element type for a builder to carry, and the
+// hundred-result cap does not apply: the server exempts COUNT from it.
 func (cmd *WithinCmd[E]) Count(ctx context.Context) (int, error) {
 	return searchCount(ctx, cmd.searchState)
 }

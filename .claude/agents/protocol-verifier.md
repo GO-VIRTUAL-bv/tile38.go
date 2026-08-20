@@ -61,7 +61,7 @@ guard and pick the matching storage. `TestRepeatedOptions` covers both sides.
 capped at 100 items when the command carries no `LIMIT` (`limitItems`). Reply
 element 0 is a **cursor**, not a count: a resume offset when the scan hit the
 limit, `0` when it ran to completion. A non-zero cursor is the truncation signal,
-which the search terminals turn into `ErrTruncated`. Discarding it is how a client
+recorded on the builder for `NextCursor` to report. Discarding it is how a client
 silently returns partial results once a collection grows past 100.
 
 **`COUNT` is exempt** — the server sets `limit = MaxUint64` — and replies with a

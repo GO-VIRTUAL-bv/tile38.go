@@ -28,9 +28,8 @@ func (cmd *IntersectsCmd[E]) Limit(n int) *IntersectsCmd[E] {
 }
 
 // Cursor resumes a search from where a previous one stopped, matching Tile38's
-// CURSOR keyword. Pass the value NextCursor reported. Setting it also means the
-// caller is paging deliberately, so a truncated result no longer reports
-// ErrTruncated. Tile38 rejects CURSOR on a fence, so Fence ignores it.
+// CURSOR keyword. Pass the value NextCursor reported. Tile38 rejects CURSOR on a
+// fence, so Fence ignores it.
 func (cmd *IntersectsCmd[E]) Cursor(n uint64) *IntersectsCmd[E] {
 	cmd.opts.cursor = &n
 	return cmd
@@ -225,14 +224,20 @@ func (cmd *IntersectsCmd[E]) A5Cells(level int) *IntersectsCmd[A5Result] {
 }
 
 // Do executes the command in whichever output format was selected, defaulting
-// to IDS. It reports ErrTruncated when Tile38 capped an unbounded search.
+// to IDS. It is one round trip and returns one page.
+//
+// Tile38 caps every output except COUNT at 100 results when the command carries
+// no LIMIT (limitItems, internal/server/scanner.go), so a query that is complete
+// against a small collection quietly returns a prefix once that collection
+// grows. Truncation is not an error: NextCursor is non-zero when the server
+// stopped early, and Iter pages past the cap instead.
 func (cmd *IntersectsCmd[E]) Do(ctx context.Context) ([]E, error) {
 	return searchDo(ctx, cmd.searchState, cmd.out)
 }
 
 // Iter pages the search to completion, yielding one result at a time in whichever
-// output format was selected. It never reports ErrTruncated: following the
-// cursor is what it does instead.
+// output format was selected, following the cursor itself so the hundred-result
+// cap never truncates what the caller sees.
 //
 //	for obj, err := range cmd.Objects().Iter(ctx) {
 //		if err != nil {
@@ -252,9 +257,8 @@ func (cmd *IntersectsCmd[E]) Iter(ctx context.Context) iter.Seq2[E, error] {
 // It returns the number of matching objects.
 //
 // COUNT is a terminal rather than an output format: its reply is a bare
-// integer, so there is no element type for a builder to carry, and it reports
-// no truncation because the server exempts it from the hundred-result cap
-// that ErrTruncated exists to surface.
+// integer, so there is no element type for a builder to carry, and the
+// hundred-result cap does not apply: the server exempts COUNT from it.
 func (cmd *IntersectsCmd[E]) Count(ctx context.Context) (int, error) {
 	return searchCount(ctx, cmd.searchState)
 }

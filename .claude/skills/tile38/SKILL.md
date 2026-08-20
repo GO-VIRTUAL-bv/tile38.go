@@ -66,14 +66,15 @@ pts, err := c.Nearby("fleet").Point(33.5, -115.5).Radius(5000).Points().Do(ctx)
 n, err   := c.Within("fleet").Bounds(33, -116, 34, -115).Count(ctx)
 ```
 
-### ErrTruncated — the #1 gotcha
+### The 100-result cap — the #1 gotcha
 
 **Tile38 caps every search except `Count` at 100 results when no `Limit` is set.**
-The client surfaces this as `tile38.ErrTruncated`; returned results are valid but
-partial.
+`Do` is one round trip and one page: a capped page comes back with a nil error,
+so a query that is complete against a small collection quietly returns a prefix
+once that collection grows.
 
-Range `Iter(ctx)` instead of calling `Do` to take everything — it pages itself,
-yields one result at a time, and never reports `ErrTruncated`:
+Range `Iter(ctx)` instead of calling `Do` to take everything — it pages itself
+and yields one result at a time:
 
 ```go
 for id, err := range c.Scan("fleet").Iter(ctx) {
@@ -84,15 +85,43 @@ for id, err := range c.Scan("fleet").Iter(ctx) {
 }
 ```
 
-Otherwise set an explicit `Limit` (or `Cursor`) to silence it — which also bounds
-`Iter` to that one page — or page by hand with `Cursor`/`NextCursor`.
+Otherwise set an explicit `Limit` (or `Cursor`), which also bounds `Iter` to that
+one page, or page by hand with `Cursor`/`NextCursor`:
 
 ```go
-ids, err := c.Scan("fleet").Do(ctx)
-if errors.Is(err, tile38.ErrTruncated) {
+scan := c.Scan("fleet")
+ids, err := scan.Do(ctx)
+if scan.NextCursor() != 0 {
     // ids holds the first 100; more match.
 }
 ```
+
+### Errors
+
+A `-ERR` reply is a `tile38.ServerError`: the command was rejected, the
+connection is fine. Two sentinels cover a miss, matched with `errors.Is` through
+every wrap: `ErrKeyNotFound` and `ErrIDNotFound`.
+
+**Over RESP most misses are a null reply, not an error.** `GET`, `JGET` and
+`BOUNDS` null out; only `FGET`, `FSET` and `RENAME` answer `-ERR`; `TTL` answers
+`-2`. The client normalises all three onto the two sentinels. A null cannot say
+which of the two went missing, so `Get`/`JGet` report `ErrIDNotFound` even for a
+missing collection. `Set(...).NX()` over an existing object is a silent no-op,
+not an error — use `Exists` if you need to know.
+
+```go
+lat, lon, err := c.Get("fleet", "truck1").Point(ctx)
+switch {
+case errors.Is(err, tile38.ErrIDNotFound):
+    // no such object; normal control flow, not a failure
+case err != nil:
+    return err
+}
+```
+
+`ErrUnexpectedReply` means the command was accepted but the reply did not decode
+— a different problem from a rejection, and retrying will not fix it.
+`ErrClosed` is a command issued on a closed `Client`.
 
 ## Live geofences
 

@@ -1,7 +1,7 @@
 # tile38.go — full command reference
 
 Companion to [SKILL.md](SKILL.md). The essentials (install, connect, chaining
-rule, `ErrTruncated`, a live-fence example) live there; this file is the complete
+rule, the 100-result cap, a live-fence example) live there; this file is the complete
 command catalog and every option.
 
 ## Configuration options
@@ -53,7 +53,7 @@ chained, not a terminal, and may be called either side of the options:
 | `Hashes(precision)` | `Hashes` | `[]HashResult` |
 | `A5Cells(level)` | `A5Cells` | `[]A5Result` |
 | `Strings()` | `Strings` | `[]StringObject` (Search only) |
-| `Count(ctx)` | `int` | terminal, not a format: bare integer, exempt from the 100 cap, never `ErrTruncated` |
+| `Count(ctx)` | `int` | terminal, not a format: bare integer, exempt from the 100 cap |
 
 Each result type is an alias for its slice, so it behaves as that slice —
 range, index, `len` — and is the *same* type: `Points` and `[]NearbyResult` are
@@ -79,7 +79,7 @@ One terminal sits outside that path, because it returns no value at all:
 
 ### Single-use options (calling twice overwrites)
 
-- `Limit(n)` — also silences `ErrTruncated`
+- `Limit(n)` — an explicit bound; also caps `Iter` to that one page
 - `Cursor(n)` — resume offset; pair with `NextCursor()`, or let `Iter` drive it
 - `Sparse(n)` — spread results (not on `Scan`; server rejects it)
 - `NoFields()` — omit field data
@@ -95,9 +95,10 @@ trucks, err := c.Scan("fleet").Match("truck:*").Do(ctx)
 ```
 
 `Iter(ctx)` replaces `Do` when you want every match rather than one page. It
-returns `iter.Seq2[E, error]`, pages by cursor itself, yields one result at a
-time, and never reports `ErrTruncated`. An explicit `Limit`/`Cursor` bounds it to
-that one page; breaking out early just stops requesting pages.
+returns `iter.Seq2[E, error]`, pages by cursor itself, and yields one result at a
+time, so the 100-result cap never truncates what the caller sees. An explicit
+`Limit`/`Cursor` bounds it to that one page; breaking out early just stops
+requesting pages.
 
 ```go
 for id, err := range c.Scan("fleet").Iter(ctx) {
@@ -220,15 +221,21 @@ v, err := c.Do(ctx, "SERVER")
 
 - `tile38.ServerError` — a `-ERR` reply; command rejected, connection healthy.
 - `tile38.ErrClosed` — issued after `Close`.
-- `tile38.ErrTruncated` — search returned partial results (see SKILL.md).
+- `tile38.ErrUnexpectedReply` — command accepted, reply did not decode.
+- `tile38.ErrKeyNotFound`, `tile38.ErrIDNotFound` — `ServerError` constants
+  holding the server's wire text. Over RESP a miss reaches the client three
+  ways and all are normalised onto these: `-ERR` (`FGET`/`FSET`/`RENAME`), a
+  null reply (`GET`/`JGET`/`BOUNDS`), and `-2` (`TTL`). There is no
+  `ErrPathNotFound` or `ErrIDExists`: those strings are Tile38's JSON output
+  mode and are unreachable over RESP, where `SET NX` is a silent no-op.
 
 Use `errors.As` / `errors.Is`.
 
 ## Gotchas
 
-- **Truncation is silent without the check** — handle `ErrTruncated` on searches,
-  set an explicit `Limit`, or use `Iter(ctx)`, which pages for you. Tile38 caps
-  every search except `Count` at 100 with no `Limit`.
+- **Truncation is silent** — `Do` returns a capped page with a nil error. Check
+  `NextCursor() != 0`, set an explicit `Limit`, or use `Iter(ctx)`, which pages
+  for you. Tile38 caps every search except `Count` at 100 with no `Limit`.
 - **`Count` returns a bare integer** and is exempt from the cap.
 - **Streams aren't pooled** and ignore `WithMaxActive`/`WithTimeout`; they hold a
   dedicated connection until `Close`.

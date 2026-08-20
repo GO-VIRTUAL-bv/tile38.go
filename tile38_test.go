@@ -616,8 +616,9 @@ func TestFenceStream(t *testing.T) {
 }
 
 // Tile38 caps every search at 100 results when no LIMIT is given and signals it
-// by returning a non-zero cursor. Dropping that cursor is how a query silently
-// starts returning partial results as a collection grows.
+// by returning a non-zero cursor. Do returns that page without an error, so
+// NextCursor is the only truncation signal a caller gets — dropping it is how a
+// query silently starts returning partial results as a collection grows.
 func TestSearchTruncation(t *testing.T) {
 	// Two ids and a cursor of 2: the scan stopped early.
 	truncated := wire("*2", ":2", "*2", "$2", "t1", "$2", "t2")
@@ -626,14 +627,12 @@ func TestSearchTruncation(t *testing.T) {
 	tests := map[string]struct {
 		reply      string
 		build      func(*Client) *ScanCmd[string]
-		wantErr    bool
 		wantCursor uint64
 		wantCmd    []string
 	}{
 		"non-zero cursor without a limit reports truncation": {
 			reply:      truncated,
 			build:      func(c *Client) *ScanCmd[string] { return c.Scan("fleet") },
-			wantErr:    true,
 			wantCursor: 2,
 			wantCmd:    []string{"SCAN", "fleet", "IDS"},
 		},
@@ -668,10 +667,10 @@ func TestSearchTruncation(t *testing.T) {
 
 			cmd := tc.build(c)
 			ids, err := cmd.Do(t.Context())
-			if tc.wantErr != errors.Is(err, ErrTruncated) {
-				t.Errorf("err = %v, want ErrTruncated: %v", err, tc.wantErr)
+			// Truncation is not an error: a capped page is a normal reply.
+			if err != nil {
+				t.Fatalf("Do = %v, want nil", err)
 			}
-			// The partial results are valid and must come back either way.
 			if want := (IDs{"t1", "t2"}); !reflect.DeepEqual(ids, want) {
 				t.Errorf("ids = %q, want %q", ids, want)
 			}
@@ -1830,7 +1829,7 @@ func TestIter(t *testing.T) {
 			t.Fatalf("saw %d ids before breaking, want 3", seen)
 		}
 
-		if _, err := cmd.Do(t.Context()); err != nil && !errors.Is(err, ErrTruncated) {
+		if _, err := cmd.Do(t.Context()); err != nil {
 			t.Fatal(err)
 		}
 		want := []string{"SCAN", "fleet", "IDS"}
@@ -1921,9 +1920,6 @@ func TestIter(t *testing.T) {
 		var serverErr ServerError
 		if !errors.As(gotErr, &serverErr) {
 			t.Errorf("error = %v, want a ServerError", gotErr)
-		}
-		if errors.Is(gotErr, ErrTruncated) {
-			t.Error("Iter reported ErrTruncated, which is its loop condition")
 		}
 		// The first page's items still reached the caller.
 		if want := []string{"t1", "t2"}; !reflect.DeepEqual(ids, want) {
@@ -2108,4 +2104,177 @@ func TestFieldOf(t *testing.T) {
 			})
 		}
 	})
+}
+
+// Tile38 spells a miss three ways over RESP — an -ERR reply, a null reply, and
+// TTL's -2 — and the client normalises all three, so a caller branching on a
+// miss writes one check rather than one per command.
+func TestNotFoundSentinels(t *testing.T) {
+	tests := map[string]struct {
+		reply string
+		call  func(*Client, context.Context) error
+		want  error
+	}{
+		// The commands that genuinely answer with -ERR over RESP.
+		"FGET on a missing object": {
+			reply: wire("-ERR id not found"),
+			call: func(c *Client, ctx context.Context) error {
+				_, err := c.FGet("fleet", "truck1", "speed").Do(ctx)
+				return err
+			},
+			want: ErrIDNotFound,
+		},
+		"RENAME on a missing collection": {
+			reply: wire("-ERR key not found"),
+			call: func(c *Client, ctx context.Context) error {
+				return c.Rename("fleet", "other").Do(ctx)
+			},
+			want: ErrKeyNotFound,
+		},
+		// GET and JGET null out instead: the -ERR text upstream carries for
+		// them belongs to the JSON output mode and never reaches this client.
+		"GET nulls out on a miss": {
+			reply: wire("$-1"),
+			call: func(c *Client, ctx context.Context) error {
+				_, _, err := c.Get("fleet", "truck1").Point(ctx)
+				return err
+			},
+			want: ErrIDNotFound,
+		},
+		"GET WITHFIELDS nulls out on a miss": {
+			reply: wire("$-1"),
+			call: func(c *Client, ctx context.Context) error {
+				_, err := c.Get("fleet", "truck1").WithFields().Object(ctx)
+				return err
+			},
+			want: ErrIDNotFound,
+		},
+		"JGET nulls out on a miss": {
+			reply: wire("$-1"),
+			call: func(c *Client, ctx context.Context) error {
+				_, err := c.JGet("fleet", "truck1", "speed").Do(ctx)
+				return err
+			},
+			want: ErrIDNotFound,
+		},
+		// A null from BOUNDS key is the collection, not an object.
+		"BOUNDS nulls out on a missing collection": {
+			reply: wire("$-1"),
+			call: func(c *Client, ctx context.Context) error {
+				_, err := c.Bounds("fleet").Do(ctx)
+				return err
+			},
+			want: ErrKeyNotFound,
+		},
+		// TTL reports a miss as -2 rather than an error reply.
+		"TTL answers a miss with -2": {
+			reply: wire(":-2"),
+			call: func(c *Client, ctx context.Context) error {
+				_, err := c.TTL("fleet", "truck1").Do(ctx)
+				return err
+			},
+			want: ErrIDNotFound,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			addr := fakeServer(t, func(r *bufio.Reader, w net.Conn) {
+				readCommand(t, r)
+				_, _ = io.WriteString(w, tc.reply)
+			})
+			c := New(addr)
+			defer c.Close()
+
+			err := tc.call(c, t.Context())
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("err = %v, want %v", err, tc.want)
+			}
+			// A miss is not a decode failure, and the two sentinels are narrow.
+			if errors.Is(err, ErrUnexpectedReply) {
+				t.Errorf("err = %v, also matched ErrUnexpectedReply", err)
+			}
+			other := ErrKeyNotFound
+			if tc.want == ErrKeyNotFound {
+				other = ErrIDNotFound
+			}
+			if errors.Is(err, other) {
+				t.Errorf("err = %v, also matched %v", err, other)
+			}
+		})
+	}
+}
+
+// SET NX over an existing object is a silent no-op over RESP, not the
+// "id already exists" error upstream returns in JSON output mode. Pinned so a
+// future reading of the server source does not turn it back into an error.
+func TestSetNXMissIsNotAnError(t *testing.T) {
+	addr := fakeServer(t, func(r *bufio.Reader, w net.Conn) {
+		readCommand(t, r)
+		_, _ = io.WriteString(w, wire("$-1"))
+	})
+	c := New(addr)
+	defer c.Close()
+
+	if err := c.Set("fleet", "truck1").NX().Point(1, 2).Do(t.Context()); err != nil {
+		t.Fatalf("SET NX = %v, want nil", err)
+	}
+}
+
+// A reply the client cannot decode is not a ServerError: the command was
+// accepted and the connection is fine, so the two need telling apart.
+func TestUnexpectedReply(t *testing.T) {
+	tests := map[string]struct {
+		reply string
+		call  func(*Client, context.Context) error
+	}{
+		"search reply is not an array": {
+			reply: wire("+OK"),
+			call: func(c *Client, ctx context.Context) error {
+				_, err := c.Scan("fleet").Do(ctx)
+				return err
+			},
+		},
+		"search item is not an id": {
+			reply: wire("*2", ":0", "*1", "*1", ":7"),
+			call: func(c *Client, ctx context.Context) error {
+				_, err := c.Scan("fleet").Do(ctx)
+				return err
+			},
+		},
+		"COUNT answers with the array form": {
+			reply: wire("*2", ":0", "*0"),
+			call: func(c *Client, ctx context.Context) error {
+				_, err := c.Scan("fleet").Count(ctx)
+				return err
+			},
+		},
+		"JGET answers with an array": {
+			reply: wire("*0"),
+			call: func(c *Client, ctx context.Context) error {
+				_, err := c.JGet("fleet", "truck1", "speed").Do(ctx)
+				return err
+			},
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			addr := fakeServer(t, func(r *bufio.Reader, w net.Conn) {
+				readCommand(t, r)
+				_, _ = io.WriteString(w, tc.reply)
+			})
+			c := New(addr)
+			defer c.Close()
+
+			err := tc.call(c, t.Context())
+			if !errors.Is(err, ErrUnexpectedReply) {
+				t.Fatalf("err = %v, want ErrUnexpectedReply", err)
+			}
+			var se ServerError
+			if errors.As(err, &se) {
+				t.Errorf("err = %v, matched ServerError; a bad shape is not a rejection", err)
+			}
+		})
+	}
 }

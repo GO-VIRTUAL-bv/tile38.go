@@ -30,30 +30,34 @@ var ErrClosed = conn.ErrClosed
 // DefaultTimeout bounds a single command when WithTimeout is not given.
 const DefaultTimeout = conn.DefaultTimeout
 
-// ErrTruncated reports that a search returned only part of what matched: Tile38
-// stopped at the limit and more objects remain.
+// ErrUnexpectedReply reports that Tile38 answered with a shape this client
+// cannot decode. It is distinct from a ServerError: the command was accepted
+// and the connection is fine, but the reply did not look like what the command
+// should produce. Wrapped errors carry the offending type or value.
+var ErrUnexpectedReply = errors.New("unexpected reply")
+
+// The misses worth branching on. They are ServerError values holding the
+// server's own wire text, so errors.Is matches them through the wrapping every
+// command does:
 //
-// This is easy to hit unknowingly, because Tile38 caps every search output
-// except COUNT at 100 results when the command carries no LIMIT (limitItems in
-// internal/server/scanner.go). A query that is correct against a small
-// collection therefore starts silently dropping results as that collection
-// grows, which is what this error exists to prevent.
-//
-// The results returned alongside it are valid, just incomplete. To take
-// everything, range Iter instead of calling Do — it follows the cursor itself
-// and never reports this error:
-//
-//	for id, err := range c.Scan("fleet").Iter(ctx) {
-//		if err != nil {
-//			return err
-//		}
-//		use(id)
+//	lat, lon, err := c.Get("fleet", "truck1").Point(ctx)
+//	if errors.Is(err, tile38.ErrIDNotFound) {
+//		// no such object; not a failure
 //	}
 //
-// Cursor and NextCursor are still there for driving the paging by hand. Or set
-// an explicit Limit to say the cap is intended — an explicit Limit or Cursor
-// silences this error, since then the bound is the caller's own.
-var ErrTruncated = errors.New("tile38: result truncated, more objects match")
+// Tile38 spells a miss three different ways over RESP, and all three are
+// normalised onto these two values so one check covers them: an -ERR reply
+// (FGET, FSET, RENAME), a null reply (GET, JGET, BOUNDS), and a magic integer
+// (TTL answers -2).
+//
+// A null reply cannot say which of the two went missing, so GET and JGET report
+// ErrIDNotFound for both a missing collection and a missing object.
+const (
+	// ErrKeyNotFound reports that the collection does not exist.
+	ErrKeyNotFound ServerError = "ERR key not found"
+	// ErrIDNotFound reports that the object does not exist in its collection.
+	ErrIDNotFound ServerError = "ERR id not found"
+)
 
 // Option configures a Client. Pass any number of them to New.
 type Option func(*options)
