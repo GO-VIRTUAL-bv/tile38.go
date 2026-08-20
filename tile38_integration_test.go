@@ -814,7 +814,8 @@ func TestPipeline(t *testing.T) {
 }
 
 // Tile38 caps a search at 100 results when no LIMIT is given, and reports it by
-// returning a non-zero cursor. This is the case a client silently gets wrong.
+// returning a non-zero cursor. Do hands back that page without an error, so
+// NextCursor is the signal — this is the case a client silently gets wrong.
 func TestSearchTruncationAndPaging(t *testing.T) {
 	c, key := newClient(t)
 	ctx := t.Context()
@@ -828,11 +829,12 @@ func TestSearchTruncationAndPaging(t *testing.T) {
 		t.Fatalf("flush: %v", err)
 	}
 
-	// A plain scan stops at the server's default of 100 and says so.
+	// A plain scan stops at the server's default of 100 and reports where to
+	// resume, without treating the capped page as a failure.
 	first := c.Scan(key)
 	ids, err := first.Do(ctx)
-	if !errors.Is(err, ErrTruncated) {
-		t.Fatalf("IDs = %v, want ErrTruncated", err)
+	if err != nil {
+		t.Fatalf("IDs = %v, want nil", err)
 	}
 	if len(ids) != 100 {
 		t.Errorf("got %d ids, want the server default of 100", len(ids))
@@ -866,8 +868,8 @@ func TestSearchTruncationAndPaging(t *testing.T) {
 		t.Errorf("paged over %d ids, want %d", len(seen), n)
 	}
 
-	// Iter does that paging itself, over the same three pages, and reports no
-	// truncation because following the cursor is what it does instead.
+	// Iter does that paging itself, over the same three pages, so the cap never
+	// truncates what the caller sees.
 	iterated := map[string]bool{}
 	for id, err := range c.Scan(key).Iter(ctx) {
 		if err != nil {
@@ -1448,4 +1450,110 @@ func waitEvent(t *testing.T, events <-chan *FenceEvent, errs <-chan error) *Fenc
 		t.Fatal("timed out waiting for a fence event")
 	}
 	return nil
+}
+
+// The not-found sentinels are only correct if the server actually behaves this
+// way, and reading upstream's token.go is not enough to know: those -ERR strings
+// are the JSON output mode's, and over RESP most misses arrive as a null reply
+// instead (internal/server/json.go, crud.go). This is the acceptance test for
+// which spelling each command really uses.
+func TestNotFoundSentinelsAgainstServer(t *testing.T) {
+	c, key := newClient(t)
+	ctx := t.Context()
+
+	if err := c.Set(key, "truck1").Point(33, -115).Do(ctx); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	if err := c.JSet(key, "doc", "name", "truck").Do(ctx); err != nil {
+		t.Fatalf("jset: %v", err)
+	}
+
+	// An -ERR reply.
+	t.Run("FGET on a missing object", func(t *testing.T) {
+		_, err := c.FGet(key, "nosuch", "speed").Do(ctx)
+		if !errors.Is(err, ErrIDNotFound) {
+			t.Fatalf("err = %v, want ErrIDNotFound", err)
+		}
+	})
+	t.Run("RENAME on a missing collection", func(t *testing.T) {
+		err := c.Rename(key+"-missing", key+"-other").Do(ctx)
+		if !errors.Is(err, ErrKeyNotFound) {
+			t.Fatalf("err = %v, want ErrKeyNotFound", err)
+		}
+	})
+
+	// A null reply. Both a missing collection and a missing object null out,
+	// and RESP cannot tell them apart, so both report ErrIDNotFound.
+	for name, call := range map[string]func() error{
+		"GET POINT on a missing object": func() error {
+			_, _, err := c.Get(key, "nosuch").Point(ctx)
+			return err
+		},
+		"GET POINT on a missing collection": func() error {
+			_, _, err := c.Get(key+"-missing", "truck1").Point(ctx)
+			return err
+		},
+		"GET object on a missing object": func() error {
+			_, err := c.Get(key, "nosuch").Object(ctx)
+			return err
+		},
+		"GET BOUNDS on a missing object": func() error {
+			_, err := c.Get(key, "nosuch").Bounds(ctx)
+			return err
+		},
+		"GET WITHFIELDS on a missing object": func() error {
+			_, err := c.Get(key, "nosuch").WithFields().Object(ctx)
+			return err
+		},
+		"JGET on a missing path": func() error {
+			_, err := c.JGet(key, "doc", "nosuch").Do(ctx)
+			return err
+		},
+		"JGET on a missing object": func() error {
+			_, err := c.JGet(key, "nosuch", "name").Do(ctx)
+			return err
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := call()
+			if !errors.Is(err, ErrIDNotFound) {
+				t.Fatalf("err = %v, want ErrIDNotFound", err)
+			}
+			if errors.Is(err, ErrUnexpectedReply) {
+				t.Errorf("err = %v, also matched ErrUnexpectedReply", err)
+			}
+		})
+	}
+
+	// BOUNDS key nulls out for the collection, not an object.
+	t.Run("BOUNDS on a missing collection", func(t *testing.T) {
+		_, err := c.Bounds(key + "-missing").Do(ctx)
+		if !errors.Is(err, ErrKeyNotFound) {
+			t.Fatalf("err = %v, want ErrKeyNotFound", err)
+		}
+	})
+
+	// A magic integer: TTL answers -2 rather than an error reply.
+	t.Run("TTL normalises its -2 miss", func(t *testing.T) {
+		_, err := c.TTL(key, "nosuch").Do(ctx)
+		if !errors.Is(err, ErrIDNotFound) {
+			t.Fatalf("err = %v, want ErrIDNotFound", err)
+		}
+	})
+
+	// SET NX over an existing object is a silent no-op over RESP; the
+	// "id already exists" error upstream carries is the JSON mode's. Pinned so
+	// nobody turns it into an error on a second reading of the server source.
+	t.Run("SET NX over an existing object is a no-op", func(t *testing.T) {
+		if err := c.Set(key, "truck1").NX().Point(34, -116).Do(ctx); err != nil {
+			t.Fatalf("SET NX = %v, want nil", err)
+		}
+		lat, _, err := c.Get(key, "truck1").Point(ctx)
+		if err != nil {
+			t.Fatalf("get: %v", err)
+		}
+		if lat != 33 {
+			t.Errorf("lat = %v, want the original 33 — NX overwrote", lat)
+		}
+	})
 }

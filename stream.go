@@ -64,7 +64,7 @@ func (s *Stream) Next() (*FenceEvent, error) {
 			}
 			return DecodeFenceEvent([]byte(payload))
 		default:
-			return nil, fmt.Errorf("tile38: stream: unexpected message type %T", v)
+			return nil, fmt.Errorf("tile38: stream: %w: message type %T", ErrUnexpectedReply, v)
 		}
 	}
 }
@@ -131,7 +131,7 @@ func (c *Client) fenceStream(ctx context.Context, args []any) (*Stream, error) {
 	}
 	if s, ok := v.(string); !ok || s != "OK" {
 		_ = cn.Close()
-		return nil, fmt.Errorf("tile38: FENCE: unexpected reply %v", v)
+		return nil, fmt.Errorf("tile38: FENCE: %w: %v", ErrUnexpectedReply, v)
 	}
 	return newStream(ctx, cn), nil
 }
@@ -163,7 +163,7 @@ func (c *Client) subscribe(ctx context.Context, command string, names []string) 
 	}
 	if _, ok := v.([]any); !ok {
 		_ = cn.Close()
-		return nil, fmt.Errorf("tile38: %s: unexpected reply %v", command, v)
+		return nil, fmt.Errorf("tile38: %s: %w: %v", command, ErrUnexpectedReply, v)
 	}
 	return newStream(ctx, cn), nil
 }

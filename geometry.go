@@ -128,7 +128,7 @@ func (cmd *TestCmd) Clip(ctx context.Context) (bool, string, error) {
 	}
 	outer, ok := val.([]any)
 	if !ok || len(outer) < 2 {
-		return false, "", fmt.Errorf("tile38: TEST CLIP: unexpected response shape: %T", val)
+		return false, "", fmt.Errorf("tile38: TEST CLIP: %w: response shape %T", ErrUnexpectedReply, val)
 	}
 	n, err := toInt64("TEST CLIP", outer[0])
 	if err != nil {

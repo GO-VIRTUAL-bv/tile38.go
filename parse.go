@@ -18,7 +18,7 @@ import (
 func searchReply(prefix string, val any) (uint64, []any, error) {
 	outer, ok := val.([]any)
 	if !ok || len(outer) < 2 {
-		return 0, nil, fmt.Errorf("tile38: %s: unexpected response shape: %T", prefix, val)
+		return 0, nil, fmt.Errorf("tile38: %s: %w: response shape %T", prefix, ErrUnexpectedReply, val)
 	}
 	cursor, err := toInt64(prefix, outer[0])
 	if err != nil || cursor < 0 {
@@ -26,7 +26,7 @@ func searchReply(prefix string, val any) (uint64, []any, error) {
 	}
 	inner, ok := outer[1].([]any)
 	if !ok {
-		return 0, nil, fmt.Errorf("tile38: %s: unexpected inner shape: %T", prefix, outer[1])
+		return 0, nil, fmt.Errorf("tile38: %s: %w: inner shape %T", prefix, ErrUnexpectedReply, outer[1])
 	}
 	return uint64(cursor), inner, nil
 }
@@ -37,7 +37,7 @@ func searchReply(prefix string, val any) (uint64, []any, error) {
 func parseCoords(prefix string, v any) (lat, lon, z float64, err error) {
 	coords, ok := v.([]any)
 	if !ok || len(coords) < 2 {
-		return 0, 0, 0, fmt.Errorf("tile38: %s: unexpected coords shape: %T", prefix, v)
+		return 0, 0, 0, fmt.Errorf("tile38: %s: %w: coords shape %T", prefix, ErrUnexpectedReply, v)
 	}
 	if lat, err = toFloat64(coords[0]); err != nil {
 		return 0, 0, 0, fmt.Errorf("tile38: %s: lat: %w", prefix, err)
@@ -67,11 +67,11 @@ func parsePoints(prefix string, val any) ([]NearbyResult, uint64, error) {
 	for _, item := range inner {
 		pair, ok := item.([]any)
 		if !ok || len(pair) < 2 {
-			return nil, 0, fmt.Errorf("tile38: %s: unexpected item shape: %T", prefix, item)
+			return nil, 0, fmt.Errorf("tile38: %s: %w: item shape %T", prefix, ErrUnexpectedReply, item)
 		}
 		id, ok := pair[0].(string)
 		if !ok {
-			return nil, 0, fmt.Errorf("tile38: %s: unexpected id type: %T", prefix, pair[0])
+			return nil, 0, fmt.Errorf("tile38: %s: %w: id type %T", prefix, ErrUnexpectedReply, pair[0])
 		}
 		lat, lon, z, err := parseCoords(prefix, pair[1])
 		if err != nil {
@@ -99,11 +99,11 @@ func parsePointsWithDistance(prefix string, val any) ([]NearbyResultWithDistance
 	for _, item := range inner {
 		pair, ok := item.([]any)
 		if !ok || len(pair) < 3 {
-			return nil, 0, fmt.Errorf("tile38: %s PointsWithDistance: unexpected item shape: %T", prefix, item)
+			return nil, 0, fmt.Errorf("tile38: %s PointsWithDistance: %w: item shape %T", prefix, ErrUnexpectedReply, item)
 		}
 		id, ok := pair[0].(string)
 		if !ok {
-			return nil, 0, fmt.Errorf("tile38: %s PointsWithDistance: unexpected id type: %T", prefix, pair[0])
+			return nil, 0, fmt.Errorf("tile38: %s PointsWithDistance: %w: id type %T", prefix, ErrUnexpectedReply, pair[0])
 		}
 		lat, lon, z, err := parseCoords(prefix+" PointsWithDistance", pair[1])
 		if err != nil {
@@ -136,7 +136,7 @@ func parseScanIDs(prefix string, val any) ([]string, uint64, error) {
 	for _, item := range inner {
 		id, ok := item.(string)
 		if !ok {
-			return nil, 0, fmt.Errorf("tile38: %s IDs: unexpected id type: %T", prefix, item)
+			return nil, 0, fmt.Errorf("tile38: %s IDs: %w: id type %T", prefix, ErrUnexpectedReply, item)
 		}
 		ids = append(ids, id)
 	}
@@ -160,7 +160,7 @@ func parseCount(prefix string, val any) (int, error) {
 		}
 		return n, nil
 	default:
-		return 0, fmt.Errorf("tile38: %s Count: unexpected count type: %T", prefix, val)
+		return 0, fmt.Errorf("tile38: %s Count: %w: count type %T", prefix, ErrUnexpectedReply, val)
 	}
 }
 
@@ -177,15 +177,15 @@ func parseStringItems[T any](prefix string, val any, build func(id, value string
 	for _, item := range inner {
 		pair, ok := item.([]any)
 		if !ok || len(pair) < 2 {
-			return nil, 0, fmt.Errorf("tile38: %s: unexpected item shape: %T", prefix, item)
+			return nil, 0, fmt.Errorf("tile38: %s: %w: item shape %T", prefix, ErrUnexpectedReply, item)
 		}
 		id, ok := pair[0].(string)
 		if !ok {
-			return nil, 0, fmt.Errorf("tile38: %s: unexpected id type: %T", prefix, pair[0])
+			return nil, 0, fmt.Errorf("tile38: %s: %w: id type %T", prefix, ErrUnexpectedReply, pair[0])
 		}
 		value, ok := pair[1].(string)
 		if !ok {
-			return nil, 0, fmt.Errorf("tile38: %s: unexpected value type: %T", prefix, pair[1])
+			return nil, 0, fmt.Errorf("tile38: %s: %w: value type %T", prefix, ErrUnexpectedReply, pair[1])
 		}
 		var fields Fields
 		if len(pair) > 2 {
@@ -246,11 +246,11 @@ func parseRects(prefix string, val any) ([]RectResult, uint64, error) {
 	for _, item := range inner {
 		pair, ok := item.([]any)
 		if !ok || len(pair) < 2 {
-			return nil, 0, fmt.Errorf("tile38: %s Bounds: unexpected item shape: %T", prefix, item)
+			return nil, 0, fmt.Errorf("tile38: %s Bounds: %w: item shape %T", prefix, ErrUnexpectedReply, item)
 		}
 		id, ok := pair[0].(string)
 		if !ok {
-			return nil, 0, fmt.Errorf("tile38: %s Bounds: unexpected id type: %T", prefix, pair[0])
+			return nil, 0, fmt.Errorf("tile38: %s Bounds: %w: id type %T", prefix, ErrUnexpectedReply, pair[0])
 		}
 		box, err := parseBoundsResult(prefix, pair[1], false)
 		if err != nil {
@@ -318,17 +318,19 @@ func fieldString(v any) string {
 // [[swlat, swlon], [nelat, nelon]], while BOUNDS key emits the collection extent
 // x-first as [[minlon, minlat], [maxlon, maxlat]]. lonFirst selects the latter.
 func parseBoundsResult(prefix string, val any, lonFirst bool) (BoundsResult, error) {
+	// GET screens its own null in GetCmd.exec, so a null reaching here is
+	// BOUNDS key on a collection that does not exist.
 	if val == nil {
-		return BoundsResult{}, fmt.Errorf("tile38: %s Bounds: not found", prefix)
+		return BoundsResult{}, fmt.Errorf("tile38: %s Bounds: %w", prefix, ErrKeyNotFound)
 	}
 	outer, ok := val.([]any)
 	if !ok || len(outer) < 2 {
-		return BoundsResult{}, fmt.Errorf("tile38: %s Bounds: unexpected response shape: %T", prefix, val)
+		return BoundsResult{}, fmt.Errorf("tile38: %s Bounds: %w: response shape %T", prefix, ErrUnexpectedReply, val)
 	}
 	corner := func(name string, v any) ([2]float64, error) {
 		pair, ok := v.([]any)
 		if !ok || len(pair) < 2 {
-			return [2]float64{}, fmt.Errorf("tile38: %s Bounds: unexpected %s shape: %T", prefix, name, v)
+			return [2]float64{}, fmt.Errorf("tile38: %s Bounds: %w: %s shape %T", prefix, ErrUnexpectedReply, name, v)
 		}
 		first, err := toFloat64(pair[0])
 		if err != nil {
@@ -360,13 +362,13 @@ func parseBoundsResult(prefix string, val any, lonFirst bool) (BoundsResult, err
 func parseHooks(prefix string, val any) ([]HookInfo, error) {
 	outer, ok := val.([]any)
 	if !ok {
-		return nil, fmt.Errorf("tile38: %s: unexpected response shape: %T", prefix, val)
+		return nil, fmt.Errorf("tile38: %s: %w: response shape %T", prefix, ErrUnexpectedReply, val)
 	}
 	hooks := make([]HookInfo, 0, len(outer))
 	for i, item := range outer {
 		desc, ok := item.([]any)
 		if !ok || len(desc) < 2 {
-			return nil, fmt.Errorf("tile38: %s: item %d unexpected shape: %T", prefix, i, item)
+			return nil, fmt.Errorf("tile38: %s: %w: item %d shape %T", prefix, ErrUnexpectedReply, i, item)
 		}
 		name, ok := desc[0].(string)
 		if !ok {
@@ -393,13 +395,13 @@ func parseHooks(prefix string, val any) ([]HookInfo, error) {
 func parseStringSlice(prefix string, val any) ([]string, error) {
 	items, ok := val.([]any)
 	if !ok {
-		return nil, fmt.Errorf("tile38: %s: unexpected response shape: %T", prefix, val)
+		return nil, fmt.Errorf("tile38: %s: %w: response shape %T", prefix, ErrUnexpectedReply, val)
 	}
 	result := make([]string, 0, len(items))
 	for _, item := range items {
 		s, ok := item.(string)
 		if !ok {
-			return nil, fmt.Errorf("tile38: %s: unexpected item type: %T", prefix, item)
+			return nil, fmt.Errorf("tile38: %s: %w: item type %T", prefix, ErrUnexpectedReply, item)
 		}
 		result = append(result, s)
 	}
@@ -410,7 +412,7 @@ func parseStringSlice(prefix string, val any) ([]string, error) {
 func lookupKV(prefix string, val any, key string) (any, error) {
 	items, ok := val.([]any)
 	if !ok {
-		return nil, fmt.Errorf("tile38: %s: unexpected response shape: %T", prefix, val)
+		return nil, fmt.Errorf("tile38: %s: %w: response shape %T", prefix, ErrUnexpectedReply, val)
 	}
 	for i := 0; i+1 < len(items); i += 2 {
 		if name, ok := items[i].(string); ok && name == key {
@@ -435,7 +437,7 @@ func toFloat64(v any) (float64, error) {
 		}
 		return f, nil
 	default:
-		return 0, fmt.Errorf("unexpected type %T", v)
+		return 0, fmt.Errorf("%w: type %T", ErrUnexpectedReply, v)
 	}
 }
 
@@ -451,7 +453,7 @@ func toInt64(prefix string, v any) (int64, error) {
 		}
 		return n, nil
 	default:
-		return 0, fmt.Errorf("tile38: %s: unexpected integer type %T", prefix, v)
+		return 0, fmt.Errorf("tile38: %s: %w: integer type %T", prefix, ErrUnexpectedReply, v)
 	}
 }
 
@@ -465,6 +467,6 @@ func toString(prefix string, v any) (string, error) {
 	case int64:
 		return strconv.FormatInt(x, 10), nil
 	default:
-		return "", fmt.Errorf("tile38: %s: unexpected response type %T", prefix, v)
+		return "", fmt.Errorf("tile38: %s: %w: response type %T", prefix, ErrUnexpectedReply, v)
 	}
 }

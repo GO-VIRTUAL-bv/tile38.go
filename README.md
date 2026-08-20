@@ -98,8 +98,8 @@ are single-use and overwrite. They chain either side of the output format:
 
 `Count` and `Fence` are terminals rather than output formats, so they end a
 chain in place of `Do`: `c.Within("fleet").Bounds(…).Count(ctx)` returns an
-`int`, and `Fence(ctx)` returns a live `*Stream`. `Count` never reports
-`ErrTruncated`, because Tile38 exempts `COUNT` from the result cap.
+`int`, and `Fence(ctx)` returns a live `*Stream`. `Count` is exempt from the
+result cap below, so it always answers for the whole collection.
 
 `Points` and `Objects` results carry the object's `Fields` beside its geometry,
 so reading a collection's state is one round trip rather than an `FGet` per
@@ -163,21 +163,23 @@ Field, collection and server commands: `FGet`, `FSet`, `FExists`, `JGet`/`JSet`/
 ### Result limits
 
 **Tile38 caps every search except `Count` at 100 results when the command
-carries no `LIMIT`.** It reports that it stopped early by returning a non-zero
-cursor, which this client surfaces as `ErrTruncated`:
+carries no `LIMIT`** ([`limitItems`][limititems]). It reports that it stopped
+early by returning a non-zero cursor, which `NextCursor` hands back:
 
 ```go
-ids, err := c.Scan("fleet").Do(ctx)
-if errors.Is(err, ErrTruncated) {
+scan := c.Scan("fleet")
+ids, err := scan.Do(ctx)
+if scan.NextCursor() != 0 {
     // ids holds the first 100; more objects match.
 }
 ```
 
-The results returned alongside the error are valid, just incomplete.
+`Do` is one round trip and one page. A capped page is a normal reply, not an
+error — so a query that is complete against a small collection quietly returns a
+prefix once that collection grows past 100.
 
 To take everything, range `Iter` instead of calling `Do`. It follows the cursor
-itself, yields one result at a time so you never see a page boundary, and never
-reports `ErrTruncated` — paging is what it does instead of complaining:
+itself and yields one result at a time, so you never see a page boundary:
 
 ```go
 for id, err := range c.Scan("fleet").Iter(ctx) {
@@ -200,10 +202,52 @@ for obj, err := range c.Nearby("fleet").Point(33.5, -112.2).Radius(5000).Objects
 Breaking out of the range just stops asking for pages; each one is an ordinary
 pooled round trip, so nothing is left open.
 
-Otherwise, set an explicit `Limit` to say the cap is intended — an explicit
-`Limit` or `Cursor` silences the error, since then the bound is yours, and it
-bounds `Iter` the same way: one page, not the whole collection. `Cursor` and
-`NextCursor` are still there for driving the paging by hand.
+Otherwise, set an explicit `Limit` to say the cap is intended. An explicit
+`Limit` or `Cursor` bounds `Iter` too: one page, not the whole collection.
+`Cursor` and `NextCursor` are there for driving the paging by hand.
+
+[limititems]: https://github.com/tidwall/tile38/blob/master/internal/server/scanner.go
+
+### Errors
+
+A `-ERR` reply from Tile38 comes back as a `ServerError`, which means the
+command was rejected but the connection is fine. The misses worth branching on
+have sentinels, so a lookup that finds nothing does not need string matching:
+
+```go
+lat, lon, err := c.Get("fleet", "truck1").Point(ctx)
+switch {
+case errors.Is(err, tile38.ErrIDNotFound):
+    // no such object; normal control flow, not a failure
+case err != nil:
+    return err
+}
+```
+
+`ErrKeyNotFound` and `ErrIDNotFound` carry the server's own wire text, so
+`errors.Is` matches them through every wrap.
+
+Tile38 spells a miss three different ways over RESP, and the client normalises
+all three onto those two values so one check covers them:
+
+| Spelling | Commands |
+| --- | --- |
+| `-ERR key not found` / `-ERR id not found` | `Rename`, `FGet`, `FSet` |
+| a null reply | `Get`, `JGet`, `Bounds` |
+| a magic integer (`-2`) | `TTL` |
+
+The null case is the one to know about: the `-ERR` strings you will find in
+Tile38's source for `GET` and `JGET` belong to its **JSON/HTTP output mode**, and
+never reach a RESP client. A null cannot say *which* of the two went missing, so
+`Get` and `JGet` report `ErrIDNotFound` for a missing collection as well.
+
+For the same reason `Set(...).NX()` over an existing object is a silent no-op
+over RESP rather than an error — check with `Exists` if you need to know.
+
+`ErrUnexpectedReply` is the other side: the command was accepted, but the reply
+did not decode into the shape the command should produce. It is worth telling
+apart from a `ServerError`, because retrying will not help. `ErrClosed` reports
+a command issued on a closed `Client`.
 
 ## Live geofences
 

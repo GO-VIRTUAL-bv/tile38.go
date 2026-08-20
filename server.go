@@ -141,7 +141,7 @@ func (cmd *StatsCmd) Do(ctx context.Context) ([]CollectionStats, error) {
 	}
 	outer, ok := val.([]any)
 	if !ok {
-		return nil, fmt.Errorf("tile38: STATS: unexpected response shape: %T", val)
+		return nil, fmt.Errorf("tile38: STATS: %w: response shape %T", ErrUnexpectedReply, val)
 	}
 	out := make([]CollectionStats, 0, len(outer))
 	for i, item := range outer {
