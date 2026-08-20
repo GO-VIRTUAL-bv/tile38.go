@@ -9,6 +9,13 @@ on:
     branches:
       - main
 
+# A second push to a PR supersedes the first, and the integration job pulls a
+# Tile38 container per run — so cancel the outdated one. Pushes to main are not
+# cancelled: those runs are what the ruleset's required checks report on.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
 

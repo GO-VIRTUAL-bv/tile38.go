@@ -15,6 +15,13 @@ on:
     - cron: "0 6 * * 1" # Mondays, 06:00 UTC
   workflow_dispatch:
 
+# The issue is the state, so two runs overlapping could both find the same
+# untriaged tag and open it twice. Queue instead of cancelling: a run that is
+# already deciding whether to open an issue should finish that decision.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
 permissions:
   contents: read
   issues: write
