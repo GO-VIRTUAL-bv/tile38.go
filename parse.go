@@ -265,7 +265,7 @@ func parseRects(prefix string, val any) ([]RectResult, uint64, error) {
 	return results, cursor, nil
 }
 
-// ── Results decoding ──────────────────────────────────────────────────────────
+// Results decoding
 //
 // Each parse function above is a format's decoder: format[E] holds one directly,
 // which is what lets the builders be parameterised by the element type. Nothing

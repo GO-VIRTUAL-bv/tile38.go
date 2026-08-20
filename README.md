@@ -469,19 +469,10 @@ library never pulls testcontainers into your build.
 
 ## Contributing
 
-`make lint` needs [`golangci-lint`](https://golangci-lint.run) v2:
-
-```bash
-go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest
-```
-
-`.claude/settings.json` is checked in, so [Claude Code](https://claude.com/claude-code)
-picks up two repo hooks automatically: Go files are formatted on edit, and a new
-direct dependency in `go.mod` is refused — this client is deliberately
-dependency-free. The format hook shells out to `golangci-lint` so it agrees with
-`make lint` rather than approximating it, which means it fails on every edit if
-the binary is not on your `PATH`. Install it first, or drop `.claude/settings.json`
-from your working copy.
+Setup, the test and lint commands, and the rules a change has to satisfy — every
+command being one stock Tile38 accepts, and no runtime dependencies — are in
+[CONTRIBUTING.md](CONTRIBUTING.md). Security reports go through
+[the security policy](SECURITY.md), not the issue tracker.
 
 ## Notes
 

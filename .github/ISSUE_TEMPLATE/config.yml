@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Tile38 server bug or missing command
+    url: https://github.com/tidwall/tile38/issues
+    about: This client only speaks commands stock Tile38 accepts. If the server rejects it or answers oddly, it goes upstream first.
+  - name: Usage question
+    url: https://github.com/GO-VIRTUAL-bv/tile38.go#getting-started
+    about: The README covers connecting, searching, geofences, hooks, pipelining and configuration.
+  - name: API reference
+    url: https://pkg.go.dev/github.com/GO-VIRTUAL-bv/tile38.go
+    about: Every builder and result type, with the Tile38 keyword each method emits.

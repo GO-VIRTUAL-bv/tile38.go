@@ -347,7 +347,7 @@ func fenceTokens(distance bool, detect []DetectState, commands []Command, nodwel
 	return out
 }
 
-// ── Write commands ────────────────────────────────────────────────────────────
+//region Write commands
 
 // SetCmd builds a Tile38 SET command.
 // Ordering contract: chain TTL/NX/XX then Field/Fields then one geometry method (At/Object/Bounds/Hash/String).
@@ -502,7 +502,9 @@ func (cmd *FGetCmd) Do(ctx context.Context) (string, error) {
 	return toString("FGET", val)
 }
 
-// ── Read commands ─────────────────────────────────────────────────────────────
+//endregion
+
+//region Read commands
 
 // GetCmd builds a Tile38 GET command.
 type GetCmd struct {
@@ -633,7 +635,9 @@ func (cmd *GetCmd) A5(ctx context.Context, level int) (string, error) {
 	return s, nil
 }
 
-// ── Spatial search ────────────────────────────────────────────────────────────
+//endregion
+
+//region Spatial search
 
 // NearbyCmd builds a Tile38 NEARBY command. Methods may be chained in any
 // order; the parts are assembled into protocol order when the command runs.
@@ -1470,7 +1474,9 @@ func (cmd *HooksCmd) Do(ctx context.Context) ([]HookInfo, error) {
 	return parseHooks("HOOKS", val)
 }
 
-// ── Fences: SETHOOK and SETCHAN ───────────────────────────────────────────────
+//endregion
+
+//region Fences: SETHOOK and SETCHAN
 
 // fenceState is everything SETHOOK and SETCHAN hold. The two commands take the
 // same trigger grammar after their name, so the parts — and the protocol order
@@ -1698,7 +1704,9 @@ func (cmd *HookCmd) Do(ctx context.Context) error {
 	return nil
 }
 
-// ── Pipeline ──────────────────────────────────────────────────────────────────
+//endregion
+
+//region Pipeline
 
 // Pipeline batches SET commands and executes them in a single round trip.
 // It is not safe for concurrent use.
@@ -1779,3 +1787,5 @@ func (cmd *PipelineSetCmd) Point(lat, lon float64) *PipelineSetCmd {
 func (cmd *PipelineSetCmd) Queue() {
 	cmd.p.cmds = append(cmd.p.cmds, cmd.args)
 }
+
+//endregion
