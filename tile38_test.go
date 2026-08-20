@@ -2319,3 +2319,59 @@ func TestUnexpectedReply(t *testing.T) {
 		})
 	}
 }
+
+// A dropped connection is the one stream failure a caller has to tell apart
+// from Close and cancellation, because it is the only one worth reopening for.
+func TestStreamDropIsDisconnected(t *testing.T) {
+	addr := fakeServer(t, func(r *bufio.Reader, w net.Conn) {
+		readCommand(t, r)
+		_, _ = io.WriteString(w, "+OK\r\n") // ack, then hang up
+	})
+
+	c := New(addr)
+	defer c.Close()
+
+	st, err := c.Within("fleet").Bounds(-90, -180, 90, 180).Fence(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	_, err = st.Next()
+	if !errors.Is(err, ErrDisconnected) {
+		t.Fatalf("Next after a drop = %v, want ErrDisconnected", err)
+	}
+	// The read ends at EOF, but io.EOF is Next's answer for Close alone, so the
+	// cause must not be wrapped into a drop.
+	if errors.Is(err, io.EOF) {
+		t.Errorf("a drop also matches io.EOF, which means Close: %v", err)
+	}
+}
+
+// A server that accepts the connection and then never acknowledges the fence
+// must fail rather than hang: the stream drops its read deadline only after the
+// ack, and a reconnect reaches this path without the caller asking for anything.
+func TestStreamAckDeadline(t *testing.T) {
+	addr := fakeServer(t, func(r *bufio.Reader, w net.Conn) {
+		readCommand(t, r)
+		<-time.After(3 * time.Second) // accept, then say nothing
+	})
+
+	c := New(addr, WithDialTimeout(50*time.Millisecond))
+	defer c.Close()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.Within("fleet").Bounds(-90, -180, 90, 180).Fence(t.Context())
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Fence succeeded, want a timeout")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Fence hung waiting for an acknowledgement")
+	}
+}

@@ -36,6 +36,20 @@ const DefaultTimeout = conn.DefaultTimeout
 // should produce. Wrapped errors carry the offending type or value.
 var ErrUnexpectedReply = errors.New("unexpected reply")
 
+// ErrDisconnected reports that a Stream lost its connection. It is what every
+// read failure on a stream wraps, so it is the one error a caller checks for to
+// tell "the connection went away" apart from the two reasons not to come back:
+// io.EOF after Close, and the context's own error.
+//
+// The Stream is spent — reopening is the caller's job, and deliberately so:
+// backoff, an attempt cap, and whether to fail over elsewhere are application
+// policy. See the ExampleStream_reconnect nested loop.
+//
+// Reopening is not resuming. Tile38 keeps no offset for a live fence, so every
+// event that happened during the gap is gone. A caller that cannot lose events
+// wants SETHOOK with a durable endpoint, not a fence.
+var ErrDisconnected = errors.New("connection lost")
+
 // The misses worth branching on. They are ServerError values holding the
 // server's own wire text, so errors.Is matches them through the wrapping every
 // command does:

@@ -167,6 +167,11 @@ func (p *Pool) Closed() bool {
 	return p.closed
 }
 
+// DialTimeout reports the normalised handshake deadline, so a caller that sends
+// its own command on a freshly dialled connection can bound it the way Dial
+// bounds AUTH.
+func (p *Pool) DialTimeout() time.Duration { return p.cfg.DialTimeout }
+
 // Dial opens a connection that does not belong to the pool. Callers own it and
 // must close it — this is how streams get a connection of their own.
 func (p *Pool) Dial(ctx context.Context) (*Conn, error) {

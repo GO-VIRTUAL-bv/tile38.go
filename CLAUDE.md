@@ -310,6 +310,46 @@ deadline — a quiet fence sends nothing for hours. Both live fences (bulk strin
 of JSON) and pub/sub pushes (`[message, channel, payload]` arrays) decode to
 `*FenceEvent`, so `Stream.Next` handles both shapes and skips subscribe acks.
 
+**A dropped stream is reported, not repaired.** Every read failure in
+`Stream.Next` wraps `ErrDisconnected`, which is the one label a caller needs:
+`io.EOF` means Close and `ctx.Err()` means cancellation, so anything else is the
+connection going away. Reopening is the caller's outer loop around `Fence`, and
+`ExampleStream_reconnect` in `example_test.go` is that loop — it is a compiled,
+vet-checked part of the package, so keep it working.
+
+The cause goes in with `%v` rather than a second `%w`, which is the one place
+that matters: a dropped connection is usually a read that ended at EOF, and
+wrapping it would make a drop satisfy `errors.Is(err, io.EOF)` — the answer
+`Next` promises for `Close` alone. `TestStreamDropIsDisconnected` asserts both
+halves.
+
+**Automatic reconnect was built and then deleted; do not rebuild it without
+re-litigating.** A `Stream` that re-dialled inside `Next` needed a `spent` error,
+an attempt counter, a capped backoff, a `done` channel, an `atomic.Pointer` for
+the swapped connection, and a second sentinel — `ErrReconnect` — whose only job
+was to terminate a loop the package itself had created. That is the tell: a
+feature that needs another feature to bound it. Retry policy is *application*
+policy (backoff shape, attempt cap, metrics, failing over to another address),
+so the library version could not stay knob-free, and the knobs were exactly the
+`Reconnect(WithBackoff, WithMaxRetries)` API the design had deleted. Ninety
+lines of hidden state machine replaced by one sentinel and one example.
+
+The classification the machinery encoded is still worth knowing and is written
+into the example instead: a `ServerError` from the *reopened* command is
+terminal, because a malformed fence is rejected identically every time; a dial
+failure or a mid-stream EOF is worth retrying.
+
+**Reopen is not resume.** Tile38 keeps no offset for a live fence: re-sending
+re-registers it and everything during the gap is gone. A caller who cannot lose
+events wants `SETHOOK` with a durable endpoint. `ErrDisconnected`, `Next`, and
+the example all say so, and they have to keep saying so.
+
+`openStream` bounds the acknowledgement with `Pool.DialTimeout` and clears the
+deadline only once it arrives. The ack is one ordinary command — the same thing
+`Dial` already bounds AUTH with — so a server that completes the TCP handshake
+and then says nothing fails instead of hanging forever. `TestStreamAckDeadline`
+pins it.
+
 **Endpoint URLs** (`endpoint/`). Tile38 parses thirteen endpoint schemes in
 `internal/endpoint/endpoint.go`, each with its own path shape and its own query
 parameter set, and `Manager.Validate` is parse-only — so a wrong URL surfaces as
