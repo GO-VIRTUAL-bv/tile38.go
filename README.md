@@ -287,6 +287,58 @@ collection — which Tile38 allows only on a live fence:
 st, err := c.Nearby("fleet").Roam("targets", 250).NoDwell().Fence(ctx)
 ```
 
+### Surviving a dropped connection
+
+A read failure wraps `ErrDisconnected` — `io.EOF` means `Close` and `ctx.Err()`
+means cancellation, so everything else is the connection going away. The package
+does not reopen the stream for you: backoff, an attempt cap, and whether to fail
+over elsewhere are your policy, not the library's. The loop is short, and the
+builder is reusable, so every attempt sends identical bytes:
+
+```go
+fence := c.Within("fleet").Circle(51.05, 3.72, 500).Detect(tile38.Enter, tile38.Exit)
+
+for delay := time.Duration(0); ; {
+    if delay > 0 {
+        select {
+        case <-time.After(delay):
+        case <-ctx.Done():
+            return ctx.Err()
+        }
+    }
+
+    st, err := fence.Fence(ctx)
+    if err != nil {
+        var rejected tile38.ServerError
+        if errors.As(err, &rejected) {
+            return err // a malformed fence is rejected identically every time
+        }
+        delay = min(max(2*delay, 100*time.Millisecond), 30*time.Second)
+        continue
+    }
+    delay = 0
+
+    for {
+        ev, err := st.Next()
+        if err != nil {
+            _ = st.Close()
+            if !errors.Is(err, tile38.ErrDisconnected) {
+                return err // Close, or the context ended
+            }
+            break // reopen
+        }
+        handle(ev)
+    }
+}
+```
+
+`ExampleStream_reconnect` in the package docs is the same loop, compiled.
+
+**Reopening is not resuming.** Tile38 keeps no offset for a live fence, so every
+event that happened while the connection was down is gone. If you cannot lose
+events, register the fence with `SETHOOK` against a durable endpoint (Kafka,
+AMQP, SQS) instead.
+
 ## Channels and hooks
 
 A geofence can also be registered on the server and delivered to subscribers

@@ -38,8 +38,12 @@ func newStream(ctx context.Context, cn *conn.Conn) *Stream {
 }
 
 // Next blocks until the next event arrives. It returns io.EOF after Close, and
-// the context error if the stream's context is cancelled. Any other error means
-// the connection failed; the Stream is spent either way.
+// the context error if the stream's context is cancelled. Any other error wraps
+// ErrDisconnected: the connection failed. The Stream is spent either way.
+//
+// Reopening a dropped fence is the caller's job — an outer loop around Fence,
+// with whatever backoff and attempt cap the application wants. See
+// ExampleStream_reconnect.
 func (s *Stream) Next() (*FenceEvent, error) {
 	for {
 		v, err := s.cn.ReadReply()
@@ -50,7 +54,9 @@ func (s *Stream) Next() (*FenceEvent, error) {
 			if ctxErr := s.ctx.Err(); ctxErr != nil {
 				return nil, ctxErr
 			}
-			return nil, err
+			// %v, not %w: a read that ends at EOF would otherwise make a drop
+			// satisfy errors.Is(err, io.EOF), which Next promises means Close.
+			return nil, fmt.Errorf("tile38: stream: %w: %v", ErrDisconnected, err)
 		}
 		switch m := v.(type) {
 		case string:
@@ -112,13 +118,17 @@ func (c *Client) openStream(ctx context.Context, args []any) (*conn.Conn, any, e
 	if err != nil {
 		return nil, nil, err
 	}
-	// No deadline: the reply is immediate, but everything after it is not.
-	cn.SetDeadline(context.Background(), 0)
+	// The acknowledgement is one ordinary command, so it gets the handshake
+	// deadline Dial gives AUTH: a server that completes the TCP handshake and
+	// then never answers would otherwise hang here forever. Everything after the
+	// ack is a stream, which wants no deadline at all, so it comes off again.
+	cn.SetDeadline(ctx, c.pool.DialTimeout())
 	v, err := cn.Do(args)
 	if err != nil {
 		_ = cn.Close()
 		return nil, nil, err
 	}
+	cn.SetDeadline(context.Background(), 0)
 	return cn, v, nil
 }
 
