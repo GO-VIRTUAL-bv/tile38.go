@@ -75,7 +75,7 @@ func values[Option ~func(url.Values)](opts []Option) url.Values {
 	return q
 }
 
-// ── local ─────────────────────────────────────────────────────────────────────
+//region local
 
 // Local returns a local://<channel> endpoint, which publishes to a Tile38 pub/sub
 // channel that Subscribe clients read. It is what SETCHAN registers for you, and
@@ -84,7 +84,9 @@ func Local(channel string) string {
 	return build("local", channel, nil)
 }
 
-// ── grpc ──────────────────────────────────────────────────────────────────────
+//endregion
+
+//region grpc
 
 // GRPC returns a grpc://<host>[:<port>] endpoint. Tile38 defaults the port to 80
 // when host carries none.
@@ -92,7 +94,9 @@ func GRPC(host string) string {
 	return build("grpc", host, nil)
 }
 
-// ── redis ─────────────────────────────────────────────────────────────────────
+//endregion
+
+//region redis
 
 // Redis returns a redis://<host>[:<port>]/<channel> endpoint, publishing each
 // event to a Redis pub/sub channel. Tile38 defaults the port to 6379.
@@ -100,7 +104,9 @@ func Redis(host, channel string) string {
 	return build("redis", host, nil, channel)
 }
 
-// ── disque ────────────────────────────────────────────────────────────────────
+//endregion
+
+//region disque
 
 // DisqueOption sets a query parameter on a Disque endpoint.
 type DisqueOption func(url.Values)
@@ -116,7 +122,9 @@ func Disque(host, queue string, opts ...DisqueOption) string {
 	return build("disque", host, values(opts), queue)
 }
 
-// ── kafka ─────────────────────────────────────────────────────────────────────
+//endregion
+
+//region kafka
 
 // KafkaOption sets a query parameter on a Kafka endpoint.
 type KafkaOption func(url.Values)
@@ -168,7 +176,9 @@ func Kafka(brokers []string, topic string, opts ...KafkaOption) string {
 	return build("kafka", strings.Join(brokers, ","), values(opts), topic)
 }
 
-// ── amqp ──────────────────────────────────────────────────────────────────────
+//endregion
+
+//region amqp
 
 // AMQPOption sets a query parameter on an AMQP endpoint.
 type AMQPOption func(url.Values)
@@ -242,7 +252,9 @@ func AMQPS(host, queue string, opts ...AMQPOption) string {
 	return build("amqps", host, values(opts), queue)
 }
 
-// ── mqtt ──────────────────────────────────────────────────────────────────────
+//endregion
+
+//region mqtt
 
 // MQTTOption sets a query parameter on an MQTT endpoint.
 type MQTTOption func(url.Values)
@@ -300,7 +312,9 @@ func MQTTS(host, topic string, opts ...MQTTOption) string {
 	return build("mqtts", host, values(opts), topic)
 }
 
-// ── sqs ───────────────────────────────────────────────────────────────────────
+//endregion
+
+//region sqs
 
 // SQSOption sets a query parameter on an SQS endpoint.
 type SQSOption func(url.Values)
@@ -332,7 +346,9 @@ func SQS(region, queueID, queueName string, opts ...SQSOption) string {
 	return build("sqs", region+":"+queueID, values(opts), queueName)
 }
 
-// ── pubsub ────────────────────────────────────────────────────────────────────
+//endregion
+
+//region pubsub
 
 // PubSubOption sets a query parameter on a Google Cloud Pub/Sub endpoint.
 type PubSubOption func(url.Values)
@@ -349,7 +365,9 @@ func PubSub(project, topic string, opts ...PubSubOption) string {
 	return build("pubsub", project+":"+topic, values(opts))
 }
 
-// ── nats ──────────────────────────────────────────────────────────────────────
+//endregion
+
+//region nats
 
 // NATSOption sets a query parameter on a NATS endpoint.
 type NATSOption func(url.Values)
@@ -418,7 +436,9 @@ func NATS(host, subject string, opts ...NATSOption) string {
 	return build("nats", host, values(opts), subject)
 }
 
-// ── eventhub ──────────────────────────────────────────────────────────────────
+//endregion
+
+//region eventhub
 
 // EventHub returns an Azure Event Hubs connection string, the one endpoint that
 // is not a URL. Tile38 recognises it by its "Endpoint=" prefix and requires
@@ -436,7 +456,9 @@ func EventHub(uri, keyName, key, entityPath string) string {
 		";EntityPath=" + entityPath
 }
 
-// ── cf-queue ──────────────────────────────────────────────────────────────────
+//endregion
+
+//region cf-queue
 
 // CFQueue returns a cf-queue://<accountID>/<queueID>?token=<apiToken> endpoint
 // for Cloudflare Queues. All three parts are positional because Tile38 rejects
@@ -447,3 +469,5 @@ func CFQueue(accountID, queueID, apiToken string) string {
 	q.Set("token", apiToken)
 	return build("cf-queue", accountID, q, queueID)
 }
+
+//endregion
