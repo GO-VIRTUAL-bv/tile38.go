@@ -21,6 +21,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GO-VIRTUAL-bv/tile38.go/endpoint"
+
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 )
@@ -1351,6 +1353,89 @@ func TestConcurrentCommands(t *testing.T) {
 	}
 	if n != workers*20 {
 		t.Errorf("count = %d, want %d", n, workers*20)
+	}
+}
+
+// Tile38's own endpoint parser is the acceptance test for the endpoint package:
+// SETHOOK runs every URL through it and answers with an error the client
+// surfaces, so a shape this package gets wrong fails here rather than silently
+// registering a hook that never delivers. Validate is parse-only — none of these
+// brokers has to exist.
+func TestEndpointURLs(t *testing.T) {
+	c, key := newClient(t)
+	ctx := t.Context()
+
+	urls := map[string]string{
+		"local":    endpoint.Local("alerts"),
+		"grpc":     endpoint.GRPC("10.0.0.1:9000"),
+		"redis":    endpoint.Redis("10.0.0.1", "events"),
+		"disque":   endpoint.Disque("10.0.0.1:7711", "jobs", endpoint.DisqueReplicate(2)),
+		"kafka":    endpoint.Kafka([]string{"k1:9092", "k2"}, "fleet-events", endpoint.KafkaSSL(), endpoint.KafkaSASLSHA512()),
+		"amqp":     endpoint.AMQP("guest:guest@10.0.0.1:5672", "events", endpoint.AMQPDurable(false), endpoint.AMQPRoute("fleet")),
+		"amqps":    endpoint.AMQPS("guest:guest@10.0.0.1:5671", "events"),
+		"mqtt":     endpoint.MQTT("10.0.0.1", "fleet", endpoint.MQTTRetained(), endpoint.MQTTQoS(2)),
+		"mqtts":    endpoint.MQTTS("10.0.0.1:8883", "fleet/eu/events", endpoint.MQTTUser("svc"), endpoint.MQTTPass("p&ss w")),
+		"sqs":      endpoint.SQS("eu-central-1", "123456789", "fleet", endpoint.SQSCreateQueue()),
+		"pubsub":   endpoint.PubSub("acme", "fleet", endpoint.PubSubCredPath("/etc/gcp.json")),
+		"nats":     endpoint.NATS("10.0.0.1", "fleet.events", endpoint.NATSJetstream(), endpoint.NATSUser("svc"), endpoint.NATSPass("p&ss w")),
+		"eventhub": endpoint.EventHub("sb://acme.servicebus.windows.net/", "writer", "c2VjcmV0", "fleet"),
+		"cf-queue": endpoint.CFQueue("acct1", "queue1", "tok"),
+	}
+
+	for scheme, url := range urls {
+		t.Run(scheme, func(t *testing.T) {
+			hook := key + "-" + scheme
+			t.Cleanup(func() { _ = c.DelHook(hook).Do(context.Background()) })
+
+			if err := c.SetHook(hook).EndpointURL(url).
+				Within(key).Bounds(GlobalBounds()).Do(ctx); err != nil {
+				t.Fatalf("sethook %s: %v", url, err)
+			}
+
+			hooks, err := c.Hooks(hook).Do(ctx)
+			if err != nil {
+				t.Fatalf("hooks: %v", err)
+			}
+			if len(hooks) != 1 {
+				t.Fatalf("hooks = %+v, want exactly %q", hooks, hook)
+			}
+			// The server echoes the endpoint back as it stored it, so a URL that
+			// SETHOOK split or rewrote shows up here.
+			if len(hooks[0].Endpoints) != 1 || hooks[0].Endpoints[0] != url {
+				t.Errorf("endpoints = %q, want [%q]", hooks[0].Endpoints, url)
+			}
+		})
+	}
+}
+
+// Two of the endpoint constructors work around a server rule rather than just
+// escaping their inputs, and both are only worth their comment while the server
+// still enforces it. These are the hand-written URLs they exist to avoid: if one
+// of them starts being accepted, upstream has changed and the workaround can go.
+func TestEndpointQuirksStillHold(t *testing.T) {
+	c, key := newClient(t)
+	ctx := t.Context()
+
+	rejected := map[string]string{
+		// endpoint.NATS defaults the port because of this one. Note the message
+		// names SQS: upstream shares the error across the two parsers.
+		"nats without an explicit port": "nats://10.0.0.1/fleet.events",
+		// endpoint.MQTTRetained sends 1 because of this one.
+		"mqtt retained as a boolean": "mqtt://10.0.0.1/fleet?retained=true",
+		// endpoint.Kafka takes the topic positionally because of this one.
+		"kafka without a topic": "kafka://10.0.0.1:9092",
+	}
+
+	for name, url := range rejected {
+		t.Run(name, func(t *testing.T) {
+			hook := key + "-rejected"
+			t.Cleanup(func() { _ = c.DelHook(hook).Do(context.Background()) })
+
+			if err := c.SetHook(hook).EndpointURL(url).
+				Within(key).Bounds(GlobalBounds()).Do(ctx); err == nil {
+				t.Errorf("sethook %s succeeded, want it rejected", url)
+			}
+		})
 	}
 }
 

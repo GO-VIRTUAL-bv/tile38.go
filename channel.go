@@ -12,175 +12,20 @@ import (
 // SetChanCmd builds a Tile38 SETCHAN command for a pub/sub geofence channel.
 // SETCHAN is identical to SETHOOK but broadcasts events to Subscribe clients
 // instead of pushing to an endpoint URL: a spatial trigger (Nearby/Within),
-// optional Detect/Commands filters, and one fence area.
+// optional Detect/Commands filters, and one fence area. It shares its chain
+// methods with HookCmd through fenceBase, so every one of them returns
+// *SetChanCmd however godoc renders the promoted signature.
 //
 // Methods may be chained in any order; the parts are assembled into protocol
 // order when the command runs.
 type SetChanCmd struct {
-	c        *Client
-	name     string
-	meta     [][2]string
-	ex       *int
-	trigger  []any // NEARBY|WITHIN|INTERSECTS collection
-	args     []any // repeatable options that follow the trigger
-	detect   []DetectState
-	commands []Command
-	nodwell  bool
-	distance bool
-	geom     []any // fence area
-	radius   *int  // trailing metres of a POINT area
-}
-
-// Nearby selects the NEARBY spatial trigger. Use with Point and Radius, or with
-// Roam.
-func (cmd *SetChanCmd) Nearby(collection string) *SetChanCmd {
-	cmd.trigger = []any{"NEARBY", collection}
-	return cmd
-}
-
-// Within selects the WITHIN spatial trigger. Use with any fence area.
-func (cmd *SetChanCmd) Within(collection string) *SetChanCmd {
-	cmd.trigger = []any{"WITHIN", collection}
-	return cmd
-}
-
-// Intersects selects the INTERSECTS spatial trigger, which fires on any overlap
-// with the fence area rather than requiring full containment.
-func (cmd *SetChanCmd) Intersects(collection string) *SetChanCmd {
-	cmd.trigger = []any{"INTERSECTS", collection}
-	return cmd
-}
-
-// Meta attaches a key/value pair to the channel, echoed back on every event it
-// produces. It accumulates: each call adds another pair.
-func (cmd *SetChanCmd) Meta(key, value string) *SetChanCmd {
-	cmd.meta = append(cmd.meta, [2]string{key, value})
-	return cmd
-}
-
-// EX sets how long the channel lives before Tile38 removes it, in seconds.
-func (cmd *SetChanCmd) EX(secs int) *SetChanCmd {
-	cmd.ex = &secs
-	return cmd
-}
-
-// Where sets an optional Tile38 field expression filter.
-func (cmd *SetChanCmd) Where(expr string) *SetChanCmd {
-	cmd.args = append(cmd.args, "WHERE", expr)
-	return cmd
-}
-
-// Detect restricts the channel to the given transitions. When omitted, Tile38's
-// default detect set applies.
-func (cmd *SetChanCmd) Detect(states ...DetectState) *SetChanCmd {
-	cmd.detect = states
-	return cmd
-}
-
-// Commands restricts the channel to events caused by the given commands.
-func (cmd *SetChanCmd) Commands(commands ...Command) *SetChanCmd {
-	cmd.commands = commands
-	return cmd
-}
-
-// Roam fires when objects in the trigger collection come within radiusM metres
-// of an object in collection. Use with Nearby.
-//
-// Objects that stay in range keep reporting on each update; chain NoDwell to
-// suppress those.
-func (cmd *SetChanCmd) Roam(collection string, radiusM int) *SetChanCmd {
-	cmd.geom = []any{"ROAM", collection, "*", radiusM}
-	return cmd
-}
-
-// NoDwell stops a roaming fence from re-reporting objects that stay within range
-// between updates, matching Tile38's NODWELL keyword. It only affects Roam
-// fences, and it is opt-in: dwelling is Tile38's own default.
-func (cmd *SetChanCmd) NoDwell() *SetChanCmd {
-	cmd.nodwell = true
-	return cmd
-}
-
-// Distance adds each object's distance from the fence centre to every event the
-// fence produces, matching Tile38's DISTANCE keyword. It arrives on FenceEvent
-// as Distance, and applies to the live fence only — a plain query reads the same
-// value through PointsWithDistance.
-func (cmd *SetChanCmd) Distance() *SetChanCmd {
-	cmd.distance = true
-	return cmd
-}
-
-// Bounds sets the fence area to a lat/lon bounding box. Pass GlobalBounds() to
-// fence the whole world.
-func (cmd *SetChanCmd) Bounds(swLat, swLon, neLat, neLon float64) *SetChanCmd {
-	cmd.geom = []any{"BOUNDS", swLat, swLon, neLat, neLon}
-	return cmd
-}
-
-// Circle sets the fence area to a circle with centre + radius in metres.
-func (cmd *SetChanCmd) Circle(lat, lon float64, radius int) *SetChanCmd {
-	cmd.geom = []any{"CIRCLE", lat, lon, radius}
-	return cmd
-}
-
-// Point sets the fence area to a point, and is the area a Nearby trigger takes:
-// NEARBY reads "POINT lat lon meters" and rejects CIRCLE, so a channel fencing
-// on NEARBY needs this rather than Circle. Pair it with Radius.
-func (cmd *SetChanCmd) Point(lat, lon float64) *SetChanCmd {
-	cmd.geom = []any{"POINT", lat, lon}
-	return cmd
-}
-
-// Radius sets the trailing metres of a Point area. Named for the value it
-// carries: Tile38 has no keyword for it, it is the last argument of
-// "POINT lat lon meters".
-func (cmd *SetChanCmd) Radius(metres int) *SetChanCmd {
-	cmd.radius = &metres
-	return cmd
-}
-
-// Object sets the fence area to an inline GeoJSON string.
-func (cmd *SetChanCmd) Object(geojson string) *SetChanCmd {
-	cmd.geom = []any{"OBJECT", geojson}
-	return cmd
-}
-
-// Sector sets the search area to a circular sector: a circle of radius metres
-// centred on lat/lon, clipped to the arc between two compass bearings in
-// degrees. Matches Tile38's SECTOR keyword, which NEARBY does not accept.
-func (cmd *SetChanCmd) Sector(lat, lon float64, metres int, bearing1, bearing2 float64) *SetChanCmd {
-	cmd.geom = []any{"SECTOR", lat, lon, metres, bearing1, bearing2}
-	return cmd
-}
-
-// Hash sets the search area to the box a geohash covers, matching Tile38's HASH
-// keyword. The shorter the hash, the larger the box.
-func (cmd *SetChanCmd) Hash(geohash string) *SetChanCmd {
-	cmd.geom = []any{"HASH", geohash}
-	return cmd
-}
-
-// QuadKey sets the search area to the tile a Bing Maps quadkey names, matching
-// Tile38's QUADKEY keyword. Tile is the same area expressed as x/y/z.
-func (cmd *SetChanCmd) QuadKey(quadkey string) *SetChanCmd {
-	cmd.geom = []any{"QUADKEY", quadkey}
-	return cmd
-}
-
-// Get sets the fence area to an object already stored in Tile38.
-func (cmd *SetChanCmd) Get(collection, id string) *SetChanCmd {
-	cmd.geom = []any{"GET", collection, id}
-	return cmd
+	fenceBase[*SetChanCmd]
 }
 
 // Do executes the SETCHAN command.
 func (cmd *SetChanCmd) Do(ctx context.Context) error {
 	head := hookHead([]any{"SETCHAN", cmd.name}, cmd.meta, cmd.ex)
-	head = append(head, cmd.trigger...)
-	args := buildSearch(append(head, cmd.args...), searchOpts{},
-		fenceTokens(cmd.distance, cmd.detect, cmd.commands, cmd.nodwell), nil,
-		pointGeometry(cmd.geom, cmd.radius))
-	if _, err := cmd.c.do(ctx, args...); err != nil {
+	if _, err := cmd.c.do(ctx, cmd.buildFence(head)...); err != nil {
 		return fmt.Errorf("tile38: SETCHAN: %w", err)
 	}
 	return nil
