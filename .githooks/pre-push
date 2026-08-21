@@ -1,0 +1,12 @@
+#!/bin/sh
+# Lint before every push, so CI is not the first thing to notice.
+# Bypass for a work-in-progress branch with `git push --no-verify`.
+#
+# Enable in a fresh clone with `make hooks` — git does not read a checked-in
+# hooks directory on its own.
+
+if ! git diff --quiet || ! git diff --cached --quiet; then
+	echo "pre-push: working tree is dirty — linting it, not the commits being pushed." >&2
+fi
+
+exec make lint test

@@ -32,14 +32,12 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Run go fmt
-        run: |
-          if [ -n "$(gofmt -l .)" ]; then
-            echo "Go files must be formatted with gofmt. Please run:"
-            echo "  make fmt"
-            gofmt -l .
-            exit 1
-          fi
+      # Both targets are `make lint` prerequisites, so the pre-push hook and CI
+      # enforce one definition instead of two copies that drift. golangci-lint
+      # reports neither: its formatters block is applied by `golangci-lint fmt`
+      # rather than `run`, and the MPL-2.0 header is not a linter's business.
+      - name: Check formatting and licence headers
+        run: make check-fmt check-header
 
       - name: Run go vet
         run: make vet
