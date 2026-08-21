@@ -31,6 +31,15 @@ go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(cat .golangc
 
 Integration tests need Docker; nothing else does.
 
+Once golangci-lint is in place, `make hooks` points `core.hooksPath` at
+`.githooks`, whose `pre-push` runs `make lint test` before every push. Git will not
+pick a checked-in hooks directory up on its own, so that one command is
+per-clone. Bypass it on a work-in-progress branch with `git push --no-verify`.
+
+`make lint` also fails on a Go file that is not gofmt-formatted, or that is
+missing the MPL-2.0 Exhibit A header — the header is what puts a file inside the
+licence at all. CI runs the same two make targets, so the hook predicts it.
+
 ## Before opening a PR
 
 ```bash
