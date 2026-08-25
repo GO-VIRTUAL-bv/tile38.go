@@ -122,11 +122,14 @@ are all zero or when the query used `NoFields`. `FieldOf` decodes one without a
 a miss, for a field you control and know is set:
 
 ```go
-speed, ok := tile38.FieldOf[float64](p.Fields, "speed")
-if !ok {
-    continue // absent, or not a float64 — FieldOf does not distinguish
+for _, p := range pts {
+    speed, ok := tile38.FieldOf[float64](p.Fields, "speed")
+    if !ok {
+        continue // absent, or not a float64 — FieldOf does not distinguish
+    }
+    id := tile38.MustFieldOf[int64](p.Fields, "vehicle_id")
+    log.Printf("%d doing %v", id, speed)
 }
-id := tile38.MustFieldOf[int64](p.Fields, "vehicle_id")
 ```
 
 `T` is any basic numeric type, plus `bool` and `string` — every float, signed and
@@ -195,7 +198,10 @@ variable is whatever that format yields — a `SearchObject` here:
 
 ```go
 for obj, err := range c.Nearby("fleet").Point(33.5, -112.2).Radius(5000).Objects().Iter(ctx) {
-    …
+    if err != nil {
+        return err
+    }
+    log.Println(obj.ID, obj.GeoJSON)
 }
 ```
 
@@ -397,9 +403,10 @@ Each constructor returns a plain `string`, so it nests straight into
 `EndpointURL`. `http://` and `https://` need no helper — Tile38 takes those
 verbatim.
 
-Hooks and channels trigger on `Nearby`, `Within`, or `Intersects`, take the same
-fence areas as a search — `Bounds`, `Circle`, `Object`, `Get`, `A5` — plus
-`Roam`, and accept `Meta` and `EX`. `GlobalBounds()` returns the whole-world box
+Hooks and channels trigger on `Nearby`, `Within`, or `Intersects`, take the
+fence areas `Bounds`, `Circle`, `Object`, `Get`, `Hash`, `QuadKey` and `Sector`
+— plus `Roam` — and accept `Meta` and `EX`. `A5` is a search area only; Tile38
+rejects it on a hook or channel. `GlobalBounds()` returns the whole-world box
 as four values, which Go binds straight onto `Bounds`' parameters.
 
 A roaming fence reports objects that stay in range on every update. Chain
@@ -500,9 +507,13 @@ Or with the [skills](https://skills.sh) CLI:
 npx skills add GO-VIRTUAL-bv/tile38.go@tile38
 ```
 
-The skill lives at [.claude/skills/tile38](.claude/skills/tile38) (`SKILL.md` plus
-a `reference.md` command catalog); you can also copy that folder into any
-`~/.claude/skills/` directly.
+The skill lives at [.claude/skills/tile38](.claude/skills/tile38); you can also
+copy that folder into any `~/.claude/skills/` directly. It is deliberately one
+short file — the API shape, the chaining rule, and the 100-result cap — and
+points at `go doc` for the command catalog. A second copy of the catalog in prose
+cost more tokens to read than the doc comments it duplicated, and was the only
+part of the docs that could be wrong: it shipped three `Set` methods that have
+never existed.
 
 ## License
 

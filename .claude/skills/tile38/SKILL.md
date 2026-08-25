@@ -9,8 +9,8 @@ A dependency-free Go client for [Tile38](https://tile38.com). It speaks RESP ove
 `net.Conn` directly, so **live geofences** (a connection that streams events) are
 first-class — something a Redis-library client cannot do.
 
-**Full command catalog, options, channels/hooks, pipelining, and every gotcha:
-[reference.md](reference.md).** This file is the fast path.
+This file is the fast path: the shape of the API and the one gotcha that bites
+first. The catalog lives in the doc comments — see **Everything else** below.
 
 ## Install
 
@@ -33,8 +33,8 @@ if err := c.Ping(ctx); err != nil { return err }
 ```
 
 Options: `WithPassword`, `WithMaxIdle`, `WithMaxActive`, `WithDialTimeout`,
-`WithTimeout`. `Client` is safe for concurrent use; nothing connects until the
-first command. See [reference.md](reference.md#configuration-options) for defaults.
+`WithTimeout` — each doc comment states its default. `Client` is safe for
+concurrent use; nothing connects until the first command.
 
 ## Core rule: chain, then call the terminal
 
@@ -142,5 +142,31 @@ for {
 ```
 
 `Detect`: `Inside`, `Outside`, `Enter`, `Exit`, `Cross`. A `Nearby` fence can
-`Roam("targets", 250)`. Server-side fences (`SetChan`/`SetHook`), pipelining, and
-management commands are all in [reference.md](reference.md).
+`Roam("targets", 250)`. `Fence` is on `Nearby`, `Within` and `Intersects` only.
+
+## Everything else
+
+`go doc github.com/GO-VIRTUAL-bv/tile38.go <Symbol>` is the catalog. It is
+generated from the code, so unlike this file it cannot be wrong — and every doc
+comment carries the protocol quirk that bites at that call site: the 100-result
+cap on each `Do`, why `NearbyCmd` has no `Buffer`, the three spellings of a miss
+on `ErrIDNotFound`. Read the symbol rather than guessing at it.
+
+The names to look up:
+
+- **Server-side fences** — `SetChan`, `Subscribe`/`PSubscribe`, `SetHook`,
+  `Hooks`/`Chans`, `DelHook`/`DelChan`. The sibling `endpoint` package builds the
+  fourteen endpoint URL schemes (`endpoint.Kafka`, `endpoint.NATS`, …).
+- **More searching** — `Search` (matches stored string values), `Test` with the
+  `Area*` constructors, `Buffer`, `WhereEval`/`WhereEvalSha`, `Asc`/`Desc`,
+  `Sparse`, `Distance`.
+- **Reads and fields** — `Get(…)` terminals `Point`/`PointZ`/`Bounds`/`Object`/
+  `Hash`/`A5`/`WithFields`; `FGet`, `FSet`, `FExists`; `FieldOf[T]` and
+  `MustFieldOf[T]` to decode a field off a result.
+- **Management** — `Del`, `Drop`, `PDel`, `Rename`, `Expire`, `Persist`, `TTL`,
+  `Exists`, `Keys`, `Bounds`, `Stats`, `DBSize`, `FlushDB`, `JSet`/`JGet`/`JDel`.
+- **Server** — `ConfigGet`/`ConfigSet`/`ConfigRewrite`, `GC`, `Healthz`,
+  `AOFShrink`, `ReadOnly`, `Follow`/`FollowNone`, `Timeout`.
+- **Batching** — `Pipeline()`, then `.Set(…).Queue()` per write and `Flush(ctx)`.
+- **Anything unmodeled** — `c.Do(ctx, "SERVER")` sends a raw command; replies
+  decode to `string`, `int64`, `[]any` or `nil`.
