@@ -152,8 +152,15 @@ make lint
 make test
 ```
 
-Then update `.claude/skills/tile38/reference.md` — it is the published command
-catalog for this client and drifts silently when a command is added without it.
+The doc comment on the new method is the catalog entry — `.claude/skills/tile38`
+carries no command list to update, deliberately. Give the exported identifier a
+full-sentence doc comment naming the protocol quirk that bites at that call site;
+`go doc` is what callers and agents read, and unlike prose it cannot drift.
+
+Touch `SKILL.md` only if the command changes the *shape* of the API rather than
+adding to it — a new terminal, a new chaining rule. Adding a name to its
+**Everything else** list is enough for anything else, and `make check-docs`
+compiles any Go example you put there.
 
 ## No new dependencies
 

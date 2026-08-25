@@ -39,6 +39,12 @@ jobs:
       - name: Check formatting and licence headers
         run: make check-fmt check-header
 
+      # The README and the shipped Claude skill both document this API in prose,
+      # which nothing compiled — that is how three non-existent `Set` methods
+      # reached the skill. This builds every ```go fence against the package.
+      - name: Check the documentation examples compile
+        run: make check-docs
+
       - name: Run go vet
         run: make vet
 
