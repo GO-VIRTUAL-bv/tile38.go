@@ -38,7 +38,11 @@ per-clone. Bypass it on a work-in-progress branch with `git push --no-verify`.
 
 `make lint` also fails on a Go file that is not gofmt-formatted, or that is
 missing the MPL-2.0 Exhibit A header — the header is what puts a file inside the
-licence at all. CI runs the same two make targets, so the hook predicts it.
+licence at all. It further compiles every ```go fence in `README.md` and the
+shipped Claude skill against the package, so a documented method that does not
+exist fails here instead of in a caller's editor. That means a Go fence in those
+files has to be real Go: elide with a comment rather than `…`, and declare what
+you use. CI runs the same make targets, so the hook predicts it.
 
 ## Before opening a PR
 

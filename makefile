@@ -1,7 +1,7 @@
 # --- Default target ---
 .DEFAULT_GOAL := help
 
-.PHONY: help hooks lint check-lint-version check-fmt check-header fmt vet test test-integration test-all benchmark tidy
+.PHONY: help hooks lint check-lint-version check-fmt check-header check-docs fmt vet test test-integration test-all benchmark tidy
 
 help: ## Show this help
 	@echo ""
@@ -9,7 +9,7 @@ help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-25s\033[0m %s\n", $$1, $$2}'
 
 ## 🧹 Linting & Formatting
-lint: check-lint-version check-fmt check-header ## Run golangci-lint, including integration-tagged files
+lint: check-lint-version check-fmt check-header check-docs ## Run golangci-lint, including integration-tagged files
 	@golangci-lint run ./...
 	@golangci-lint run --build-tags=integration ./...
 
@@ -47,6 +47,13 @@ check-header: ## Fail if any Go file is missing the MPL-2.0 Exhibit A header
 		echo "$$bad"; \
 		exit 1; \
 	fi
+
+# The shipped skill is prose, so nothing compiled it — and it named three `Set`
+# geometry terminals that have never existed. This compiles every ```go fence in
+# the docs against the package, so a method on the wrong receiver fails here
+# rather than in a caller's editor.
+check-docs: ## Fail if a Go example in the docs does not compile
+	@./scripts/check-docs.sh README.md .claude/skills/tile38/SKILL.md
 
 fmt: ## Format all Go files
 	@go fmt ./...
