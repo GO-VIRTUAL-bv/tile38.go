@@ -13,7 +13,23 @@ updates:
     labels:
       - "dependencies"
       - "go"
+    # First match wins: families first, then the catch-all.
     groups:
+      go-virtual:
+        patterns: ["github.com/GO-VIRTUAL-bv/*"]
+      grpc-protobuf:
+        patterns:
+          - "google.golang.org/grpc*"
+          - "google.golang.org/genproto*"
+          - "google.golang.org/protobuf"
+          - "github.com/grpc-ecosystem/*"
+          - "buf.build/*"
+      opentelemetry:
+        patterns: ["go.opentelemetry.io/*"]
+      golang-x:
+        patterns: ["golang.org/x/*"]
+      watermill:
+        patterns: ["github.com/ThreeDotsLabs/*"]
       testcontainers:
         patterns:
           - "github.com/testcontainers/*"
@@ -21,6 +37,11 @@ updates:
           - "github.com/moby/*"
           - "github.com/containerd/*"
           - "github.com/opencontainers/*"
+      franz-go:
+        patterns: ["github.com/twmb/*"]
+      go:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
 
   # GitHub Actions
   - package-ecosystem: "github-actions"
@@ -33,3 +54,7 @@ updates:
     labels:
       - "dependencies"
       - "github-actions"
+    groups:
+      actions:
+        patterns: ["*"]
+
